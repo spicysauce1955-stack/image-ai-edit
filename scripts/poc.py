@@ -1,12 +1,34 @@
-"""POC CLI: insert a reference object into a scene photo.
+"""POC CLI — insert a reference object into a scene photo.
 
-Usage:
+Thin wrapper around :func:`ai_edit.pipeline.insert.insert_object` that
+handles file I/O and writes results into ``out/``.
+
+Usage
+-----
+::
+
     python scripts/poc.py SCENE.jpg REFERENCE.jpg "instruction text"
 
-Optional:
-    --segment "ground,trees,sky"   request Grounded-SAM masks for these labels
-    --out DIR                      output dir (default: out/)
+Optional flags
+--------------
+``--segment LABELS``
+    Comma-separated labels (e.g. ``"ground,trees,sky"``) to mask via
+    Grounded-SAM. Empty = skip segmentation, in which case
+    ``REPLICATE_API_TOKEN`` is not needed and only ``GEMINI_API_KEY``
+    is required.
+``--out DIR``
+    Where to write outputs (default: ``out/``). Composites land in
+    ``DIR/composites/<timestamp>.<ext>``; per-label masks land in
+    ``DIR/masks/<timestamp>-<label>.png``.
+
+Exit codes
+----------
+``0``
+    Success.
+``2``
+    A required input image was not found.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,10 +42,16 @@ from ai_edit.pipeline import insert_object
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the POC."""
     p = argparse.ArgumentParser(description="Insert a reference object into a scene.")
     p.add_argument("scene", type=Path, help="Scene image (e.g. backyard.jpg)")
-    p.add_argument("reference", type=Path, help="Reference object image (e.g. fence.jpg)")
-    p.add_argument("instruction", help="What to do, e.g. 'put this fence along the back of the yard'")
+    p.add_argument(
+        "reference", type=Path, help="Reference object image (e.g. fence.jpg)"
+    )
+    p.add_argument(
+        "instruction",
+        help="What to do, e.g. 'put this fence along the back of the yard'",
+    )
     p.add_argument(
         "--segment",
         default="",
@@ -35,6 +63,9 @@ def parse_args() -> argparse.Namespace:
 
 
 async def main() -> int:
+    """Entry point used by ``if __name__ == '__main__'`` below."""
+    # Load .env before anything else so providers find their keys when
+    # they're constructed inside insert_object().
     load_env()
     args = parse_args()
 
@@ -66,6 +97,9 @@ async def main() -> int:
     )
     elapsed = time.time() - t0
 
+    # Timestamp prefixes mean repeated runs accumulate side-by-side
+    # rather than overwriting each other — important when iterating
+    # on the prompt or vendor.
     ts = time.strftime("%Y%m%d-%H%M%S")
     for mask in result.masks:
         out = masks_dir / f"{ts}-{mask.label.replace(' ', '_')}.png"

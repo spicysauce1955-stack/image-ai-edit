@@ -2,12 +2,20 @@
 
 Living design notes for `image-ai-edit`. Mirror of the project notes in the Obsidian vault at `~/ideaverse/OpenClaw/projects/image-ai-edit/`.
 
+**Design**
 | File | Purpose |
 |---|---|
 | [stack-decision.md](./stack-decision.md) | Chosen 2026 API stack and why |
 | [api-catalog.md](./api-catalog.md) | Full vendor matrix (segmentation, edit, image-to-3D, AR) |
 | [poc-plan.md](./poc-plan.md) | First POC: scope, milestones, success criteria |
 | [open-questions.md](./open-questions.md) | Things to test or decide before scaling |
+
+**Code**
+| File | Purpose |
+|---|---|
+| [architecture.md](./architecture.md) | Layer map, file map, capability interfaces, data flow |
+| [runbook.md](./runbook.md) | How to run the POC, troubleshoot it, read its output |
+| [contributing.md](./contributing.md) | Recipes: add a provider, add a capability, style conventions |
 
 ## TL;DR
 
