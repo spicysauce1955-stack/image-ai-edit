@@ -1,9 +1,8 @@
 """fal.ai provider — IC-Light v2 relighting.
 
-Used (or *will be* used, once M5 of the POC plan kicks in) as a
-post-processing step that relights a finished composite to match the
-scene's sun direction. Treat it as optional: the pipeline is correct
-without it, just less convincing on lighting-sensitive scenes.
+Used as a post-processing step that relights a finished composite to
+match the scene's sun direction. Treat it as optional: the pipeline is
+correct without it, just less convincing on lighting-sensitive scenes.
 
 Auth quirk
 ----------
@@ -11,20 +10,25 @@ fal.ai uses ``Authorization: Key <api_key>`` rather than the more common
 ``Bearer`` scheme — that's why this provider overrides
 :meth:`BaseProvider._headers`.
 
-Sync vs queue
--------------
+Sync vs queue endpoint
+----------------------
 fal exposes two endpoints for every model:
 
 - ``https://fal.run/<model>`` — synchronous. Blocks until the model
-  finishes. Fine for IC-Light because it returns in a few seconds.
-- ``https://queue.fal.run/<model>`` — async with polling. Needed for
-  long jobs (e.g. video).
+  finishes. Hits a hard ~180 s gateway timeout, which is *not* enough
+  for IC-Light v2 cold starts.
+- ``https://queue.fal.run/<model>`` — submit + poll. Returns immediately
+  with a status URL; we poll until ``COMPLETED`` and then fetch the
+  result via ``response_url``.
 
-We use the sync endpoint here since IC-Light is fast.
+We use the **queue** endpoint here because IC-Light v2 routinely runs
+30–90 s warm and several minutes cold, and the sync endpoint cancels
+us before that finishes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from typing import Any
 
@@ -36,8 +40,8 @@ from ..models.base import BaseProvider, EditModel, EditResponse
 BASE_URL = "https://fal.run"
 QUEUE_URL = "https://queue.fal.run"
 DEFAULT_RELIGHT_MODEL = "fal-ai/iclight-v2"
-POLL_INTERVAL_S = 1.0
-POLL_TIMEOUT_S = 180.0
+POLL_INTERVAL_S = 2.0
+POLL_TIMEOUT_S = 600.0
 
 
 def _data_uri(image_bytes: bytes, mime_type: str) -> str:
@@ -46,7 +50,7 @@ def _data_uri(image_bytes: bytes, mime_type: str) -> str:
 
 
 class FalAIRelight(EditModel):
-    """IC-Light v2 relighting client.
+    """IC-Light v2 relighting client (queue-based).
 
     Implements :class:`EditModel` so the pipeline can chain it after
     Gemini without a special-case branch — pass the Gemini composite
@@ -55,8 +59,9 @@ class FalAIRelight(EditModel):
 
     The first image in ``images`` is used; any others are ignored
     because IC-Light is single-image. We chose to keep the
-    :class:`EditModel` shape rather than a dedicated ``relight()`` method
-    so the pipeline can swap relighters without touching its call site.
+    :class:`EditModel` shape rather than a dedicated ``relight()``
+    method so the pipeline can swap relighters without touching its
+    call site.
     """
 
     def __init__(self, provider: FalAI) -> None:
@@ -70,7 +75,13 @@ class FalAIRelight(EditModel):
         model: str | None = None,
         **kwargs: Any,
     ) -> EditResponse:
-        """Relight ``images[0]`` using ``instruction`` as the prompt."""
+        """Relight ``images[0]`` using ``instruction`` as the prompt.
+
+        Submits to the queue endpoint, polls until the request is
+        ``COMPLETED``, then fetches the response and downloads the
+        first image. Polling timeout is generous (10 min) to absorb
+        cold starts.
+        """
         if not images:
             raise ValueError("FalAIRelight.edit requires at least one input image.")
         image_bytes, mime = images[0]
@@ -81,14 +92,43 @@ class FalAIRelight(EditModel):
         }
         payload.update(kwargs)
 
-        target = f"{BASE_URL}/{model or DEFAULT_RELIGHT_MODEL}"
+        model_id = model or DEFAULT_RELIGHT_MODEL
+        submit_url = f"{QUEUE_URL}/{model_id}"
 
-        async with httpx.AsyncClient(timeout=POLL_TIMEOUT_S) as client:
-            resp = await client.post(
-                target, headers=self._provider._headers(), json=payload
+        async with httpx.AsyncClient(timeout=60) as client:
+            # 1. Submit — returns immediately with status + response URLs.
+            submit = await client.post(
+                submit_url, headers=self._provider._headers(), json=payload
             )
-            resp.raise_for_status()
-            data = resp.json()
+            submit.raise_for_status()
+            sub = submit.json()
+
+            status_url = sub.get("status_url")
+            response_url = sub.get("response_url")
+            if not status_url or not response_url:
+                raise RuntimeError(f"fal.ai queue submit returned no URLs: {sub}")
+
+            # 2. Poll. fal returns IN_QUEUE / IN_PROGRESS / COMPLETED.
+            elapsed = 0.0
+            while True:
+                if elapsed >= POLL_TIMEOUT_S:
+                    raise TimeoutError(
+                        f"fal.ai prediction timed out after {POLL_TIMEOUT_S}s"
+                    )
+                await asyncio.sleep(POLL_INTERVAL_S)
+                elapsed += POLL_INTERVAL_S
+                poll = await client.get(status_url, headers=self._provider._headers())
+                poll.raise_for_status()
+                status = poll.json().get("status")
+                if status == "COMPLETED":
+                    break
+                if status in ("FAILED", "CANCELED", "ERROR"):
+                    raise RuntimeError(f"fal.ai prediction {status}: {poll.json()}")
+
+            # 3. Fetch the actual result.
+            final = await client.get(response_url, headers=self._provider._headers())
+            final.raise_for_status()
+            data = final.json()
 
             # fal.ai response shape varies by model: most use
             # ``images[].url`` but a few wrap a single result in

@@ -14,12 +14,16 @@ Optional flags
 ``--segment LABELS``
     Comma-separated labels (e.g. ``"ground,trees,sky"``) to mask via
     Grounded-SAM. Empty = skip segmentation, in which case
-    ``REPLICATE_API_TOKEN`` is not needed and only ``GEMINI_API_KEY``
-    is required.
+    ``REPLICATE_API_TOKEN`` is not needed.
+``--relight PROMPT``
+    Relight the Gemini composite via fal.ai IC-Light v2. Empty = skip
+    relight, in which case ``FAL_KEY`` is not needed. When relight runs
+    we save **both** the raw Gemini composite and the relit version
+    side-by-side so the caller can A/B them.
 ``--out DIR``
     Where to write outputs (default: ``out/``). Composites land in
-    ``DIR/composites/<timestamp>.<ext>``; per-label masks land in
-    ``DIR/masks/<timestamp>-<label>.png``.
+    ``DIR/composites/<timestamp>(-raw|-relit).<ext>``; per-label masks
+    land in ``DIR/masks/<timestamp>-<label>.png``.
 
 Exit codes
 ----------
@@ -58,6 +62,13 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated labels to mask via Grounded-SAM (e.g. 'ground,trees,sky'). "
         "Empty = skip segmentation.",
     )
+    p.add_argument(
+        "--relight",
+        default="",
+        help="Relight the composite via fal.ai IC-Light with this prompt "
+        "(e.g. 'warm afternoon sun from the right, soft ground shadows'). "
+        "Empty = skip relight.",
+    )
     p.add_argument("--out", type=Path, default=Path("out"), help="Output directory")
     return p.parse_args()
 
@@ -77,6 +88,7 @@ async def main() -> int:
         return 2
 
     seg_prompts = [s.strip() for s in args.segment.split(",") if s.strip()]
+    relight_prompt = args.relight.strip() or None
 
     args.out.mkdir(parents=True, exist_ok=True)
     masks_dir = args.out / "masks"
@@ -87,6 +99,8 @@ async def main() -> int:
     print(f"[poc] scene={args.scene} reference={args.reference}")
     if seg_prompts:
         print(f"[poc] segmenting: {seg_prompts}")
+    if relight_prompt:
+        print(f"[poc] relighting: {relight_prompt!r}")
 
     t0 = time.time()
     result = await insert_object(
@@ -94,6 +108,7 @@ async def main() -> int:
         args.reference,
         args.instruction,
         segmentation_prompts=seg_prompts or None,
+        relight_prompt=relight_prompt,
     )
     elapsed = time.time() - t0
 
@@ -107,9 +122,19 @@ async def main() -> int:
         print(f"[poc] mask  -> {out}")
 
     ext = "png" if result.composite_mime == "image/png" else "jpg"
-    composite_path = composites_dir / f"{ts}.{ext}"
-    composite_path.write_bytes(result.composite_bytes)
-    print(f"[poc] composite -> {composite_path}  ({elapsed:.1f}s)")
+    if result.composite_bytes_relit:
+        # When relight ran, write both versions so the caller can A/B.
+        raw_path = composites_dir / f"{ts}-raw.png"
+        relit_path = composites_dir / f"{ts}-relit.{ext}"
+        raw_path.write_bytes(result.composite_bytes_raw)
+        relit_path.write_bytes(result.composite_bytes_relit)
+        print(f"[poc] composite (raw)   -> {raw_path}")
+        print(f"[poc] composite (relit) -> {relit_path}  ({elapsed:.1f}s)")
+    else:
+        composite_path = composites_dir / f"{ts}.{ext}"
+        composite_path.write_bytes(result.composite_bytes)
+        print(f"[poc] composite -> {composite_path}  ({elapsed:.1f}s)")
+
     if result.text:
         print(f"[poc] model text: {result.text[:200]}")
     return 0
