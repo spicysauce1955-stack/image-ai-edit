@@ -124,6 +124,23 @@ class EditResponse:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class Image3DResponse:
+    """Result of an image-to-3D generation call.
+
+    Asset format coverage varies by vendor. We stash whatever was
+    requested into the matching field; consumers should pick the format
+    they need (GLB for ``<model-viewer>`` and Android Scene Viewer,
+    USDZ for iOS AR Quick Look).
+    """
+
+    glb_bytes: bytes = b""
+    usdz_bytes: bytes = b""
+    fbx_bytes: bytes = b""
+    obj_bytes: bytes = b""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 class BaseProvider:
     """Common state shared by every provider.
 
@@ -224,6 +241,27 @@ class SegmentationModel(ABC):
         mime_type: str = "image/jpeg",
         **kwargs: Any,
     ) -> SegmentationResponse: ...
+
+
+class Image3DModel(ABC):
+    """Image-to-3D generation capability.
+
+    Implementations take one or more reference images and return a 3D
+    asset bundle (GLB/USDZ/FBX/OBJ). Used by the AR phase of the
+    project to turn product photos into a model placeable through
+    ``<model-viewer>``.
+    """
+
+    @abstractmethod
+    async def generate(
+        self,
+        images: list[tuple[bytes, str]],
+        *,
+        target_formats: list[str] | None = None,
+        target_polycount: int = 30000,
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> Image3DResponse: ...
 
 
 class EditModel(ABC):

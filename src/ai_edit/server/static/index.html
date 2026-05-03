@@ -87,10 +87,38 @@
 
   <div id="result" class="result"></div>
 
+  <hr style="margin: 2.5rem 0; border: 0; border-top: 1px solid #8884;" />
+
+  <h1 style="font-size:1.2rem;margin-bottom:0.25rem;">Build AR asset</h1>
+  <p class="sub">Upload several reference photos of the object — Meshy turns them into a GLB+USDZ pair you can place in your room via your phone. <strong>Slow:</strong> typically 5–10 minutes.</p>
+  <form id="ar-form">
+    <label>Reference photos
+      <small>3–8 well-lit views from different angles work best.</small>
+      <input type="file" name="references" accept="image/*" multiple required />
+    </label>
+    <button type="submit">Build AR asset</button>
+    <div id="ar-status" class="status"></div>
+    <div id="ar-result" class="result"></div>
+  </form>
+
+  <template id="refine-tpl">
+    <form id="refine-form" style="margin-top:1rem;display:grid;gap:0.6rem;">
+      <label>Refine
+        <small>"move it left", "make the fence taller", "remove the umbrella"…</small>
+        <textarea name="instruction" required placeholder="What should change?"></textarea>
+      </label>
+      <button type="submit">Refine</button>
+    </form>
+  </template>
+
 <script>
 const form = document.getElementById('form');
 const status = document.getElementById('status');
 const result = document.getElementById('result');
+
+// Holds the most recent composite blob so refinement turns can send it
+// back as the `previous` field. Reset whenever the initial form runs.
+let lastComposite = null;
 
 // Drag-drop wiring for the two file inputs.
 document.querySelectorAll('.drop').forEach(drop => {
@@ -123,34 +151,115 @@ function preview(drop, file) {
   });
 }
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const button = form.querySelector('button');
-  button.disabled = true;
-  result.innerHTML = '';
+async function postPipeline(formData) {
+  const t0 = performance.now();
   status.textContent = 'Running pipeline… (Gemini ~10–20s, IC-Light adds ~30s)';
   status.classList.remove('err');
-
-  const t0 = performance.now();
   try {
-    const res = await fetch('/api/insert', {
-      method: 'POST',
-      body: new FormData(form),
-    });
+    const res = await fetch('/api/insert', { method: 'POST', body: formData });
     if (!res.ok) {
       const detail = await res.text();
       throw new Error(`HTTP ${res.status}: ${detail}`);
     }
     const blob = await res.blob();
+    lastComposite = blob;
     const url = URL.createObjectURL(blob);
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
     status.textContent = `Done in ${elapsed}s.`;
-    result.innerHTML = `<img src="${url}" alt="composite" />
-      <p><a href="${url}" download="composite.png">Download</a></p>`;
+    renderResult(url);
   } catch (err) {
     status.textContent = String(err);
     status.classList.add('err');
+  }
+}
+
+function renderResult(url) {
+  result.innerHTML = `<img src="${url}" alt="composite" />
+    <p><a href="${url}" download="composite.png">Download</a></p>`;
+  // Append a refine form so the user can iterate without re-uploading.
+  const refineNode = document.getElementById('refine-tpl').content.cloneNode(true);
+  result.appendChild(refineNode);
+  const refineForm = result.querySelector('#refine-form');
+  refineForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const button = refineForm.querySelector('button');
+    button.disabled = true;
+    try {
+      // Build a fresh FormData from the original inputs so the server
+      // gets the scene + reference again — Gemini benefits from having
+      // the originals as ground truth in every refinement turn.
+      const fd = new FormData();
+      const scene = form.querySelector('input[name=scene]').files[0];
+      const reference = form.querySelector('input[name=reference]').files[0];
+      if (!scene || !reference) {
+        throw new Error('Original scene/reference missing — refresh and try again.');
+      }
+      fd.append('scene', scene);
+      fd.append('reference', reference);
+      fd.append('instruction', refineForm.instruction.value);
+      fd.append('previous', lastComposite, 'previous.png');
+      await postPipeline(fd);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const button = form.querySelector('button');
+  button.disabled = true;
+  result.innerHTML = '';
+  lastComposite = null;
+  try {
+    await postPipeline(new FormData(form));
   } finally {
+    button.disabled = false;
+  }
+});
+
+// AR build form. Long-running — Meshy takes minutes — so we just
+// disable the button and show a heartbeat. No polling endpoint yet.
+const arForm = document.getElementById('ar-form');
+const arStatus = document.getElementById('ar-status');
+const arResult = document.getElementById('ar-result');
+
+arForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const button = arForm.querySelector('button');
+  button.disabled = true;
+  arResult.innerHTML = '';
+  arStatus.classList.remove('err');
+  const t0 = performance.now();
+  let heartbeat;
+  try {
+    arStatus.textContent = 'Submitting to Meshy…';
+    let dots = 0;
+    heartbeat = setInterval(() => {
+      const elapsed = ((performance.now() - t0) / 1000).toFixed(0);
+      dots = (dots + 1) % 4;
+      arStatus.textContent = `Building AR asset${'.'.repeat(dots)} (${elapsed}s)`;
+    }, 1000);
+
+    const res = await fetch('/api/build-ar', { method: 'POST', body: new FormData(arForm) });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`HTTP ${res.status}: ${detail}`);
+    }
+    const data = await res.json();
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    arStatus.textContent = `Done in ${elapsed}s.`;
+    arResult.innerHTML = `
+      <p><a href="${data.viewer_url}" target="_blank" rel="noopener">Open AR viewer ↗</a></p>
+      <p style="color:#888;font-size:0.9rem;">
+        Direct: <a href="${data.glb_url}" download>model.glb</a> ·
+        <a href="${data.usdz_url}" download>model.usdz</a>
+      </p>`;
+  } catch (err) {
+    arStatus.textContent = String(err);
+    arStatus.classList.add('err');
+  } finally {
+    clearInterval(heartbeat);
     button.disabled = false;
   }
 });

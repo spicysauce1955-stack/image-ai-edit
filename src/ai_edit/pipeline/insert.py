@@ -89,6 +89,8 @@ async def insert_object(
     reference_path: str | Path,
     instruction: str,
     *,
+    previous_composite: bytes | None = None,
+    previous_mime: str = "image/png",
     segmentation_prompts: list[str] | None = None,
     relight_prompt: str | None = None,
     replicate: Replicate | None = None,
@@ -106,6 +108,17 @@ async def insert_object(
     instruction:
         Free-form description of the desired edit, e.g.
         ``"place this fence along the back edge of the lawn"``.
+    previous_composite:
+        Optional bytes of a previous composite from this conversation.
+        When provided the call is treated as a *refinement turn*: the
+        previous composite is sent to Gemini as image 3, the prompt
+        switches into refinement mode (e.g. "move it left, make it
+        taller"), and Gemini edits the previous composite rather than
+        starting from scratch. This is what makes the multi-turn UX
+        cheap — Gemini handles iterative editing natively.
+    previous_mime:
+        MIME type of ``previous_composite``. Defaults to ``image/png``
+        which is what every step in this pipeline produces.
     segmentation_prompts:
         Optional list of labels (e.g. ``["ground", "trees", "sky"]``) to
         run Grounded-SAM against. When ``None`` the segmentation step
@@ -168,24 +181,44 @@ async def insert_object(
     # sun direction* turned out to be enough lighting fidelity for the
     # POC, removing the need for a separate IC-Light pass that was
     # otherwise restyling the reference object.
-    full_instruction = (
-        f"{instruction}\n\n"
-        "Image 1 is the scene. Image 2 is the reference object to insert. "
-        "Place the object photorealistically in the scene: respect the existing "
-        "ground plane, perspective, and occlusion (objects in front of the "
-        "inserted region must remain in front). Match the scene's lighting: "
-        "infer the sun direction from the existing shadows in image 1, then "
-        "shade the inserted object accordingly and cast a soft, realistic "
-        "ground shadow underneath it that falls in the same direction as the "
-        "other shadows in the scene. Preserve the object's exact shape, "
-        "color, material, and texture from image 2 — do not restyle or "
-        "regenerate the object. Output only the final composited image."
-    )
+    #
+    # In refinement mode (previous_composite is set) we switch into a
+    # "modify the previous composite" framing instead. Gemini still
+    # gets the original scene + reference as image 1/2 so it has the
+    # ground truth for fence appearance and scene lighting, and the
+    # previous attempt as image 3.
+    if previous_composite:
+        full_instruction = (
+            f"User refinement: {instruction}\n\n"
+            "Image 1 is the original scene. Image 2 is the reference object. "
+            "Image 3 is your previous attempt at the composite. "
+            "Apply the user's refinement to image 3 — do not restart from scratch. "
+            "Preserve everything that is already correct: fence appearance from "
+            "image 2, scene lighting and shadow direction from image 1, occlusion "
+            "of foreground objects, and overall composition. Only change what the "
+            "refinement explicitly asks for. Output only the updated composite."
+        )
+    else:
+        full_instruction = (
+            f"{instruction}\n\n"
+            "Image 1 is the scene. Image 2 is the reference object to insert. "
+            "Place the object photorealistically in the scene: respect the existing "
+            "ground plane, perspective, and occlusion (objects in front of the "
+            "inserted region must remain in front). Match the scene's lighting: "
+            "infer the sun direction from the existing shadows in image 1, then "
+            "shade the inserted object accordingly and cast a soft, realistic "
+            "ground shadow underneath it that falls in the same direction as the "
+            "other shadows in the scene. Preserve the object's exact shape, "
+            "color, material, and texture from image 2 — do not restyle or "
+            "regenerate the object. Output only the final composited image."
+        )
 
     images: list[tuple[bytes, str]] = [
         (scene_bytes, scene_mime),
         (reference_bytes, reference_mime),
     ]
+    if previous_composite:
+        images.append((previous_composite, previous_mime))
 
     gem = gemini or Gemini()
     edit = await gem.image.edit(full_instruction, images)
