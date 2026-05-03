@@ -15,6 +15,7 @@ Living design notes for `image-ai-edit`. Mirror of the project notes in the Obsi
 |---|---|
 | [architecture.md](./architecture.md) | Layer map, file map, capability interfaces, data flow |
 | [runbook.md](./runbook.md) | How to run the POC, troubleshoot it, read its output |
+| [server.md](./server.md) | FastAPI app: setup, endpoints, examples |
 | [contributing.md](./contributing.md) | Recipes: add a provider, add a capability, style conventions |
 
 ## TL;DR

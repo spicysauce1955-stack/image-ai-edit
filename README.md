@@ -13,9 +13,12 @@ Insert a user-supplied object (e.g. a fence) into a real photograph — photorea
 **Code**
 - [Architecture](./docs/architecture.md) — layer map, capability interfaces, data flow
 - [Runbook](./docs/runbook.md) — running the POC, troubleshooting, reading output
+- [Server](./docs/server.md) — FastAPI app and endpoints
 - [Contributing](./docs/contributing.md) — recipes for adding providers and capabilities
 
 ## Quick start
+
+### CLI
 
 ```bash
 uv pip install -p .venv/bin/python -e .
@@ -26,3 +29,12 @@ cp .env.example .env  # then fill in GEMINI_API_KEY (and REPLICATE_API_TOKEN if 
 ```
 
 Outputs land in `out/composites/`. See the [runbook](./docs/runbook.md) for everything else.
+
+### Web UI
+
+```bash
+uv pip install -p .venv/bin/python -e ".[server]"
+.venv/bin/python scripts/serve.py        # http://127.0.0.1:8000
+```
+
+Drag-drop the two images, get the composite back inline. See [server docs](./docs/server.md) for the HTTP API.

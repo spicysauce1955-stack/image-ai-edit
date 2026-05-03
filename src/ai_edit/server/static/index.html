@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>image-ai-edit</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 980px; margin: 2rem auto; padding: 0 1rem;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+    .sub { color: #888; margin-bottom: 1.5rem; }
+    form { display: grid; gap: 1rem; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
+    label { display: grid; gap: 0.35rem; font-weight: 600; }
+    label small { font-weight: 400; color: #888; }
+    input[type=text], textarea {
+      font: inherit; padding: 0.6rem 0.8rem;
+      border: 1px solid #8884; border-radius: 6px; background: transparent;
+    }
+    textarea { resize: vertical; min-height: 4.5rem; }
+    .drop {
+      border: 2px dashed #8886; border-radius: 8px;
+      padding: 1.25rem; text-align: center; cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .drop:hover, .drop.over { border-color: #4a9; background: #4a91; }
+    .drop img { max-width: 100%; max-height: 180px; border-radius: 4px; }
+    .drop input { display: none; }
+    button {
+      font: inherit; font-weight: 600; padding: 0.7rem 1rem;
+      border: 0; border-radius: 6px; background: #4a9; color: white;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: progress; }
+    .status { color: #888; min-height: 1.4em; }
+    .result { margin-top: 1.5rem; }
+    .result img { max-width: 100%; border-radius: 8px; }
+    .err { color: #c44; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>image-ai-edit</h1>
+  <p class="sub">Upload a scene + a reference object. The server runs Grounded-SAM (optional) → Gemini 2.5 Flash Image → IC-Light (optional) and returns the composite.</p>
+
+  <form id="form">
+    <div class="row">
+      <label>Scene
+        <small>The photo to edit into.</small>
+        <div class="drop" data-target="scene">
+          <span class="placeholder">Drop or click to choose</span>
+          <input type="file" name="scene" accept="image/*" required />
+        </div>
+      </label>
+      <label>Reference object
+        <small>The thing to insert.</small>
+        <div class="drop" data-target="reference">
+          <span class="placeholder">Drop or click to choose</span>
+          <input type="file" name="reference" accept="image/*" required />
+        </div>
+      </label>
+    </div>
+
+    <label>Instruction
+      <small>What to do — placement, framing, scale.</small>
+      <textarea name="instruction" required>place this fence along the back edge of the lawn</textarea>
+    </label>
+
+    <div class="row">
+      <label>Segment (optional)
+        <small>Comma-separated labels for Grounded-SAM. Skip for fastest run.</small>
+        <input type="text" name="segment" placeholder="e.g. ground,trees,sky" />
+      </label>
+      <label>Relight (optional)
+        <small>IC-Light prompt. Tends to restyle objects — use sparingly.</small>
+        <input type="text" name="relight" placeholder="e.g. warm afternoon sun from the right" />
+      </label>
+    </div>
+
+    <button type="submit">Generate</button>
+    <div id="status" class="status"></div>
+  </form>
+
+  <div id="result" class="result"></div>
+
+<script>
+const form = document.getElementById('form');
+const status = document.getElementById('status');
+const result = document.getElementById('result');
+
+// Drag-drop wiring for the two file inputs.
+document.querySelectorAll('.drop').forEach(drop => {
+  const input = drop.querySelector('input[type=file]');
+  drop.addEventListener('click', () => input.click());
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    if (e.dataTransfer.files.length) {
+      input.files = e.dataTransfer.files;
+      preview(drop, input.files[0]);
+    }
+  });
+  input.addEventListener('change', () => {
+    if (input.files.length) preview(drop, input.files[0]);
+  });
+});
+
+function preview(drop, file) {
+  const url = URL.createObjectURL(file);
+  drop.innerHTML = `<img src="${url}" alt="" /><input type="file" name="${drop.dataset.target}" accept="image/*" required />`;
+  // Re-bind because we replaced innerHTML.
+  const newInput = drop.querySelector('input');
+  const dt = new DataTransfer(); dt.items.add(file);
+  newInput.files = dt.files;
+  newInput.addEventListener('change', () => {
+    if (newInput.files.length) preview(drop, newInput.files[0]);
+  });
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const button = form.querySelector('button');
+  button.disabled = true;
+  result.innerHTML = '';
+  status.textContent = 'Running pipeline… (Gemini ~10–20s, IC-Light adds ~30s)';
+  status.classList.remove('err');
+
+  const t0 = performance.now();
+  try {
+    const res = await fetch('/api/insert', {
+      method: 'POST',
+      body: new FormData(form),
+    });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Error(`HTTP ${res.status}: ${detail}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    status.textContent = `Done in ${elapsed}s.`;
+    result.innerHTML = `<img src="${url}" alt="composite" />
+      <p><a href="${url}" download="composite.png">Download</a></p>`;
+  } catch (err) {
+    status.textContent = String(err);
+    status.classList.add('err');
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
