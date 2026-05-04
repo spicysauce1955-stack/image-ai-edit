@@ -16,7 +16,6 @@ Living design notes for `image-ai-edit`. Mirror of the project notes in the Obsi
 | [architecture.md](./architecture.md) | Layer map, file map, capability interfaces, data flow |
 | [runbook.md](./runbook.md) | How to run the POC, troubleshoot it, read its output |
 | [server.md](./server.md) | FastAPI app: setup, endpoints, examples |
-| [ar.md](./ar.md) | AR pipeline: Meshy → `<model-viewer>` (Quick Look + Scene Viewer) |
 | [contributing.md](./contributing.md) | Recipes: add a provider, add a capability, style conventions |
 
 ## TL;DR
@@ -41,4 +40,3 @@ backyard.jpg + fence_reference.jpg
 final.png
 ```
 
-**AR phase 2.** Meshy Multi-Image-to-3D → GLB+USDZ → `<model-viewer>` (Quick Look on iOS, Scene Viewer on Android).

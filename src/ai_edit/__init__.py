@@ -2,7 +2,7 @@
 
 Top-level convenience imports:
 
-    >>> from ai_edit import Gemini, Replicate, FalAI, Meshy, load_env
+    >>> from ai_edit import Gemini, Replicate, FalAI, load_env
     >>> load_env()              # reads .env
     >>> gem = Gemini()          # picks up GEMINI_API_KEY
 
@@ -12,6 +12,6 @@ single endpoint without going through the full pipeline.
 """
 
 from .config import load_env
-from .providers import FalAI, Gemini, Meshy, MiniMax, Replicate, ZhipuAI
+from .providers import FalAI, Gemini, MiniMax, Replicate, ZhipuAI
 
-__all__ = ["FalAI", "Gemini", "Meshy", "MiniMax", "Replicate", "ZhipuAI", "load_env"]
+__all__ = ["FalAI", "Gemini", "MiniMax", "Replicate", "ZhipuAI", "load_env"]

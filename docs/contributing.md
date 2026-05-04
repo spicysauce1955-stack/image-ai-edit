@@ -106,28 +106,28 @@ Look at `providers/gemini.py` for a complete reference implementation.
 
 ## Adding a new capability
 
-If the new vendor exposes something none of the existing ABCs cover (e.g. image-to-3D for the AR phase), don't shoehorn it into `EditModel` — add a new ABC.
+If the new vendor exposes something none of the existing ABCs cover (e.g. image upscaling), don't shoehorn it into `EditModel` — add a new ABC.
 
 1. In `models/base.py`:
    ```python
    @dataclass
-   class Image3DResponse:
-       glb_bytes: bytes = b""
-       usdz_bytes: bytes = b""
+   class UpscaleResponse:
+       image_bytes: bytes = b""
+       mime_type: str = "image/png"
        raw: dict[str, Any] = field(default_factory=dict)
 
-   class Image3DModel(ABC):
+   class UpscaleModel(ABC):
        @abstractmethod
-       async def generate(
-           self, images: list[tuple[bytes, str]], *, model: str | None = None,
-       ) -> Image3DResponse: ...
+       async def upscale(
+           self, image: bytes, *, scale: int = 2, model: str | None = None,
+       ) -> UpscaleResponse: ...
    ```
 
 2. Re-export from `models/__init__.py`.
 
-3. Implement it on the relevant provider (e.g. `providers/meshy.py`).
+3. Implement it on the relevant provider.
 
-4. Build a new pipeline in `pipeline/` rather than overloading `insert.py`. For AR that means `pipeline/ar.py` with something like `build_ar_asset(reference_paths) -> ARAsset`.
+4. Build a new pipeline in `pipeline/` rather than overloading `insert.py`.
 
 ## Style conventions
 

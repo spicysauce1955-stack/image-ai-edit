@@ -37,4 +37,4 @@ uv pip install -p .venv/bin/python -e ".[server]"
 .venv/bin/python scripts/serve.py        # http://127.0.0.1:8000
 ```
 
-Drag-drop the two images, get the composite back inline. See [server docs](./docs/server.md) for the HTTP API.
+Drag-drop the scene and reference, hit Generate, then iterate via the in-place "Refine" box ("move it left", "make it taller"). Each attempt lands in the History strip — click any thumbnail to bring it back as the base for the next refinement. See [server docs](./docs/server.md) for the HTTP API.

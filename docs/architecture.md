@@ -93,10 +93,10 @@ Callers then write `gemini.image.edit(...)` rather than `gemini.edit(...)` — k
 
 If you need something that doesn't fit `TextModel` / `ImageModel` / `SegmentationModel` / `EditModel`:
 
-1. Add a new ABC to `models/base.py` (e.g. `class Image3DModel(ABC):`).
+1. Add a new ABC to `models/base.py` (e.g. `class UpscaleModel(ABC):`).
 2. Add a normalized response dataclass alongside it.
-3. Implement it on whichever provider exposes it (e.g. a `MeshyImage3D` handler attached to a new `Meshy` provider).
+3. Implement it on whichever provider exposes it.
 4. Re-export both from `models/__init__.py` and `providers/__init__.py`.
-5. Wire it into a pipeline (likely a new `pipeline/ar.py` for the AR phase).
+5. Wire it into a pipeline (a new module under `pipeline/`).
 
 See [contributing.md](./contributing.md) for the full provider recipe.

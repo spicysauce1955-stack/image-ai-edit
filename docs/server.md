@@ -30,7 +30,8 @@ Or directly:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/` | Drag-drop upload UI (single static page) |
+| `GET` | `/` | Drag-drop upload UI |
+| `GET` | `/static/*` | CSS / JS for the UI |
 | `POST` | `/api/insert` | Run the pipeline, return composite as PNG |
 | `GET` | `/healthz` | Liveness probe |
 | `GET` | `/docs` | Auto-generated OpenAPI docs |
@@ -49,6 +50,7 @@ Optional fields:
 
 | Field | Type | Notes |
 |---|---|---|
+| `previous` | file | A previous composite from this conversation. When set the call switches into refinement mode and Gemini edits this image rather than starting from scratch. |
 | `segment` | string | Comma-separated labels for Grounded-SAM (e.g. `"ground,trees,sky"`). Empty = skip segmentation. |
 | `relight` | string | IC-Light prompt. Empty = skip relight. Tends to restyle the inserted object — use sparingly. |
 
@@ -87,7 +89,19 @@ open("composite.png", "wb").write(r.content)
 - **Errors as 502.** Any exception from `insert_object` becomes `502 Bad Gateway` because the API itself is fine — its upstream dependency failed. The exception message is in the response body.
 - **No auth.** Trust-the-network for the local POC. Stick the server behind a reverse proxy with a token check before exposing it publicly.
 
+## Web UI
+
+The page at `/` is a deliberate zero-build single-page app. Three files in `src/ai_edit/server/static/`:
+
+- `index.html` — markup only.
+- `app.css` — design tokens (light/dark via `prefers-color-scheme`), two-column layout.
+- `app.js` — drag-drop, generate, refine loop, attempt history.
+
+Layout is two columns: **inputs** on the left (scene + reference drops, instruction, advanced segment/relight options); **result** on the right (canvas + in-place "Refine" box + history strip of every attempt). Click any history thumbnail to bring it back as the base for the next refinement.
+
+If we want a richer frontend (auth, multi-tenant, persisted history), this is the wrong layer to grow it from; build a separate frontend (Next.js etc.) and call `/api/insert` from there.
+
 ## Caveats
 
-- The static UI at `/` re-implements the CLI's behavior in the browser — it's deliberately one HTML file with inline CSS/JS, no build step. If we want a real frontend (auth, history, multi-tenant), this is the wrong layer to grow it from; build a separate Next.js (or whatever) frontend and call `/api/insert` from there.
 - File size isn't capped server-side. FastAPI defaults to streaming uploads but a malicious client could OOM the box. Add a `MAX_UPLOAD_BYTES` check in `app.py` if you expose it past localhost.
+- No auth. Trust-the-network for the local POC. Stick the server behind a reverse proxy with a token check before exposing it publicly.

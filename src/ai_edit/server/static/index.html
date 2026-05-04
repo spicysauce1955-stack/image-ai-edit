@@ -4,265 +4,87 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>image-ai-edit</title>
-  <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    body {
-      font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
-      max-width: 980px; margin: 2rem auto; padding: 0 1rem;
-    }
-    h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
-    .sub { color: #888; margin-bottom: 1.5rem; }
-    form { display: grid; gap: 1rem; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-    @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
-    label { display: grid; gap: 0.35rem; font-weight: 600; }
-    label small { font-weight: 400; color: #888; }
-    input[type=text], textarea {
-      font: inherit; padding: 0.6rem 0.8rem;
-      border: 1px solid #8884; border-radius: 6px; background: transparent;
-    }
-    textarea { resize: vertical; min-height: 4.5rem; }
-    .drop {
-      border: 2px dashed #8886; border-radius: 8px;
-      padding: 1.25rem; text-align: center; cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-    }
-    .drop:hover, .drop.over { border-color: #4a9; background: #4a91; }
-    .drop img { max-width: 100%; max-height: 180px; border-radius: 4px; }
-    .drop input { display: none; }
-    button {
-      font: inherit; font-weight: 600; padding: 0.7rem 1rem;
-      border: 0; border-radius: 6px; background: #4a9; color: white;
-      cursor: pointer;
-    }
-    button:disabled { opacity: 0.5; cursor: progress; }
-    .status { color: #888; min-height: 1.4em; }
-    .result { margin-top: 1.5rem; }
-    .result img { max-width: 100%; border-radius: 8px; }
-    .err { color: #c44; white-space: pre-wrap; }
-  </style>
+  <link rel="stylesheet" href="/static/app.css" />
 </head>
 <body>
-  <h1>image-ai-edit</h1>
-  <p class="sub">Upload a scene + a reference object. The server runs Grounded-SAM (optional) → Gemini 2.5 Flash Image → IC-Light (optional) and returns the composite.</p>
+  <header>
+    <h1>image-ai-edit</h1>
+    <p class="muted">Place a reference object into a scene photo. Powered by Gemini 2.5 Flash Image.</p>
+  </header>
 
-  <form id="form">
-    <div class="row">
-      <label>Scene
-        <small>The photo to edit into.</small>
+  <main>
+    <!-- Left column: inputs -->
+    <section class="inputs card">
+      <h2>Inputs</h2>
+
+      <div class="drops">
         <div class="drop" data-target="scene">
-          <span class="placeholder">Drop or click to choose</span>
-          <input type="file" name="scene" accept="image/*" required />
+          <span class="placeholder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h18v14H3z"/><circle cx="8" cy="10" r="1.5"/><path d="M21 17l-6-6-8 8"/></svg>
+            <span>Scene</span>
+            <small>The photo to edit into</small>
+          </span>
+          <input type="file" name="scene" accept="image/*" />
         </div>
-      </label>
-      <label>Reference object
-        <small>The thing to insert.</small>
         <div class="drop" data-target="reference">
-          <span class="placeholder">Drop or click to choose</span>
-          <input type="file" name="reference" accept="image/*" required />
+          <span class="placeholder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20M2 12h20"/></svg>
+            <span>Reference</span>
+            <small>The object to insert</small>
+          </span>
+          <input type="file" name="reference" accept="image/*" />
         </div>
+      </div>
+
+      <label class="field">
+        <span class="label">Instruction</span>
+        <textarea id="instruction" rows="3" placeholder="e.g. place this fence along the back edge of the lawn">place this fence along the back edge of the lawn</textarea>
       </label>
-    </div>
 
-    <label>Instruction
-      <small>What to do — placement, framing, scale.</small>
-      <textarea name="instruction" required>place this fence along the back edge of the lawn</textarea>
-    </label>
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label class="field">
+          <span class="label">Segment <small class="muted">(Grounded-SAM, comma-sep labels)</small></span>
+          <input id="segment" type="text" placeholder="e.g. ground,trees,sky" />
+        </label>
+        <label class="field">
+          <span class="label">Relight <small class="muted">(IC-Light prompt — restyles objects, use sparingly)</small></span>
+          <input id="relight" type="text" placeholder="e.g. warm afternoon sun from the right" />
+        </label>
+      </details>
 
-    <div class="row">
-      <label>Segment (optional)
-        <small>Comma-separated labels for Grounded-SAM. Skip for fastest run.</small>
-        <input type="text" name="segment" placeholder="e.g. ground,trees,sky" />
-      </label>
-      <label>Relight (optional)
-        <small>IC-Light prompt. Tends to restyle objects — use sparingly.</small>
-        <input type="text" name="relight" placeholder="e.g. warm afternoon sun from the right" />
-      </label>
-    </div>
+      <button id="generate" class="primary">
+        <span class="label">Generate</span>
+        <span class="spinner" hidden></span>
+      </button>
+      <div id="status" class="status muted"></div>
+    </section>
 
-    <button type="submit">Generate</button>
-    <div id="status" class="status"></div>
-  </form>
+    <!-- Right column: result + history -->
+    <section class="output card">
+      <h2>Result</h2>
 
-  <div id="result" class="result"></div>
+      <div id="canvas" class="canvas empty">
+        <div class="empty-state muted">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-6"/></svg>
+          <p>Drop a scene + reference and hit Generate.</p>
+        </div>
+      </div>
 
-  <hr style="margin: 2.5rem 0; border: 0; border-top: 1px solid #8884;" />
+      <form id="refine" hidden>
+        <input type="text" id="refine-input" placeholder="Refine: 'move it left', 'remove the umbrella', 'make it taller'…" />
+        <button type="submit">Refine</button>
+      </form>
 
-  <h1 style="font-size:1.2rem;margin-bottom:0.25rem;">Build AR asset</h1>
-  <p class="sub">Upload several reference photos of the object — Meshy turns them into a GLB+USDZ pair you can place in your room via your phone. <strong>Slow:</strong> typically 5–10 minutes.</p>
-  <form id="ar-form">
-    <label>Reference photos
-      <small>3–8 well-lit views from different angles work best.</small>
-      <input type="file" name="references" accept="image/*" multiple required />
-    </label>
-    <button type="submit">Build AR asset</button>
-    <div id="ar-status" class="status"></div>
-    <div id="ar-result" class="result"></div>
-  </form>
+      <div class="history">
+        <h3>History</h3>
+        <div id="history-list" class="history-list">
+          <p class="muted small">Each generation lands here. Click a thumbnail to bring it back.</p>
+        </div>
+      </div>
+    </section>
+  </main>
 
-  <template id="refine-tpl">
-    <form id="refine-form" style="margin-top:1rem;display:grid;gap:0.6rem;">
-      <label>Refine
-        <small>"move it left", "make the fence taller", "remove the umbrella"…</small>
-        <textarea name="instruction" required placeholder="What should change?"></textarea>
-      </label>
-      <button type="submit">Refine</button>
-    </form>
-  </template>
-
-<script>
-const form = document.getElementById('form');
-const status = document.getElementById('status');
-const result = document.getElementById('result');
-
-// Holds the most recent composite blob so refinement turns can send it
-// back as the `previous` field. Reset whenever the initial form runs.
-let lastComposite = null;
-
-// Drag-drop wiring for the two file inputs.
-document.querySelectorAll('.drop').forEach(drop => {
-  const input = drop.querySelector('input[type=file]');
-  drop.addEventListener('click', () => input.click());
-  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
-  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
-  drop.addEventListener('drop', e => {
-    e.preventDefault();
-    drop.classList.remove('over');
-    if (e.dataTransfer.files.length) {
-      input.files = e.dataTransfer.files;
-      preview(drop, input.files[0]);
-    }
-  });
-  input.addEventListener('change', () => {
-    if (input.files.length) preview(drop, input.files[0]);
-  });
-});
-
-function preview(drop, file) {
-  const url = URL.createObjectURL(file);
-  drop.innerHTML = `<img src="${url}" alt="" /><input type="file" name="${drop.dataset.target}" accept="image/*" required />`;
-  // Re-bind because we replaced innerHTML.
-  const newInput = drop.querySelector('input');
-  const dt = new DataTransfer(); dt.items.add(file);
-  newInput.files = dt.files;
-  newInput.addEventListener('change', () => {
-    if (newInput.files.length) preview(drop, newInput.files[0]);
-  });
-}
-
-async function postPipeline(formData) {
-  const t0 = performance.now();
-  status.textContent = 'Running pipeline… (Gemini ~10–20s, IC-Light adds ~30s)';
-  status.classList.remove('err');
-  try {
-    const res = await fetch('/api/insert', { method: 'POST', body: formData });
-    if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`HTTP ${res.status}: ${detail}`);
-    }
-    const blob = await res.blob();
-    lastComposite = blob;
-    const url = URL.createObjectURL(blob);
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-    status.textContent = `Done in ${elapsed}s.`;
-    renderResult(url);
-  } catch (err) {
-    status.textContent = String(err);
-    status.classList.add('err');
-  }
-}
-
-function renderResult(url) {
-  result.innerHTML = `<img src="${url}" alt="composite" />
-    <p><a href="${url}" download="composite.png">Download</a></p>`;
-  // Append a refine form so the user can iterate without re-uploading.
-  const refineNode = document.getElementById('refine-tpl').content.cloneNode(true);
-  result.appendChild(refineNode);
-  const refineForm = result.querySelector('#refine-form');
-  refineForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const button = refineForm.querySelector('button');
-    button.disabled = true;
-    try {
-      // Build a fresh FormData from the original inputs so the server
-      // gets the scene + reference again — Gemini benefits from having
-      // the originals as ground truth in every refinement turn.
-      const fd = new FormData();
-      const scene = form.querySelector('input[name=scene]').files[0];
-      const reference = form.querySelector('input[name=reference]').files[0];
-      if (!scene || !reference) {
-        throw new Error('Original scene/reference missing — refresh and try again.');
-      }
-      fd.append('scene', scene);
-      fd.append('reference', reference);
-      fd.append('instruction', refineForm.instruction.value);
-      fd.append('previous', lastComposite, 'previous.png');
-      await postPipeline(fd);
-    } finally {
-      button.disabled = false;
-    }
-  });
-}
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const button = form.querySelector('button');
-  button.disabled = true;
-  result.innerHTML = '';
-  lastComposite = null;
-  try {
-    await postPipeline(new FormData(form));
-  } finally {
-    button.disabled = false;
-  }
-});
-
-// AR build form. Long-running — Meshy takes minutes — so we just
-// disable the button and show a heartbeat. No polling endpoint yet.
-const arForm = document.getElementById('ar-form');
-const arStatus = document.getElementById('ar-status');
-const arResult = document.getElementById('ar-result');
-
-arForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const button = arForm.querySelector('button');
-  button.disabled = true;
-  arResult.innerHTML = '';
-  arStatus.classList.remove('err');
-  const t0 = performance.now();
-  let heartbeat;
-  try {
-    arStatus.textContent = 'Submitting to Meshy…';
-    let dots = 0;
-    heartbeat = setInterval(() => {
-      const elapsed = ((performance.now() - t0) / 1000).toFixed(0);
-      dots = (dots + 1) % 4;
-      arStatus.textContent = `Building AR asset${'.'.repeat(dots)} (${elapsed}s)`;
-    }, 1000);
-
-    const res = await fetch('/api/build-ar', { method: 'POST', body: new FormData(arForm) });
-    if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`HTTP ${res.status}: ${detail}`);
-    }
-    const data = await res.json();
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-    arStatus.textContent = `Done in ${elapsed}s.`;
-    arResult.innerHTML = `
-      <p><a href="${data.viewer_url}" target="_blank" rel="noopener">Open AR viewer ↗</a></p>
-      <p style="color:#888;font-size:0.9rem;">
-        Direct: <a href="${data.glb_url}" download>model.glb</a> ·
-        <a href="${data.usdz_url}" download>model.usdz</a>
-      </p>`;
-  } catch (err) {
-    arStatus.textContent = String(err);
-    arStatus.classList.add('err');
-  } finally {
-    clearInterval(heartbeat);
-    button.disabled = false;
-  }
-});
-</script>
+  <script src="/static/app.js" type="module"></script>
 </body>
 </html>
