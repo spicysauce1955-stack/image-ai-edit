@@ -93,16 +93,28 @@ DEFAULT_FREE_PROMPT = (
     "the object. Output only the final composited image."
 )
 
-# Mask mode goes to FLUX-Kontext-LoRA, not Gemini, so the prompt is
-# short and descriptive. The mask is a hard alpha constraint at the
-# provider level — we don't have to convince the model to honor it
-# from the prompt. Focus instead on object appearance + lighting.
+# Mask mode goes to FLUX-Kontext-LoRA, not Gemini. The mask is a hard
+# alpha constraint at the provider level, so the prompt is purely
+# about object identity and integration. Empirically, the most
+# effective phrasing tells FLUX to *preserve specific structural
+# details* of the reference — slats/posts/texture by name — rather
+# than just "use the reference". Without this kind of language the
+# model produces a flat featureless inpaint of roughly the right
+# colour. The "exactly as shown in the reference image" phrase is the
+# key unlock; combined with guidance_scale=4.5 it carries the
+# reference's structure into the output.
 DEFAULT_MASK_PROMPT = (
-    "Place the reference object photorealistically inside the masked "
-    "region of the scene. Match the scene's lighting and shadow "
-    "direction. Cast a soft realistic ground shadow under the object. "
-    "Preserve the object's color, material, and texture exactly as in "
-    "the reference image."
+    "Insert the object photorealistically inside the masked region. "
+    "Reproduce the object exactly as shown in the reference image — "
+    "preserve every structural detail (slats, posts, panels, seams, "
+    "ribs, edges, bolts, joints, whatever the reference shows), "
+    "preserve the exact colour and material, and preserve the surface "
+    "texture and finish. Do not flatten, smooth, or generalize the "
+    "object. Match the scene's perspective and the existing ground "
+    "plane. Match the scene's lighting: infer the sun direction from "
+    "the existing shadows in the scene and shade the object "
+    "accordingly, casting a soft realistic ground shadow consistent "
+    "with that direction."
 )
 
 DEFAULT_REFINE_PROMPT = (
@@ -210,8 +222,9 @@ async def insert_object(
     replicate: Replicate | None = None,
     gemini: Gemini | None = None,
     falai: FalAI | None = None,
-    inpaint_guidance_scale: float = 3.5,
-    inpaint_steps: int = 30,
+    inpaint_guidance_scale: float = 4.5,
+    inpaint_steps: int = 40,
+    inpaint_strength: float = 0.92,
 ) -> InsertResult:
     """Run the insertion pipeline end-to-end.
 
@@ -239,10 +252,11 @@ async def insert_object(
         Optional IC-Light v2 prompt for a post-processing pass.
     replicate, gemini, falai:
         Provider DI hooks.
-    inpaint_guidance_scale, inpaint_steps:
+    inpaint_guidance_scale, inpaint_steps, inpaint_strength:
         Forwarded to FLUX-Kontext-LoRA when in mask mode. Defaults
-        match what fal.ai's docs recommend; turn the guidance up for
-        stricter prompt adherence at the cost of variety.
+        (g=4.5, steps=40, s=0.92) were tuned empirically — see
+        ``docs/results/`` for the comparison sweep. Turn guidance up
+        further for stricter prompt adherence at the cost of variety.
     """
     scene_path = Path(scene_path)
     reference_path = Path(reference_path)
@@ -302,6 +316,7 @@ async def insert_object(
             prompt=flux_prompt,
             guidance_scale=inpaint_guidance_scale,
             num_inference_steps=inpaint_steps,
+            strength=inpaint_strength,
         )
         raw_bytes = edit_resp.image_bytes
         raw_mime = edit_resp.mime_type
