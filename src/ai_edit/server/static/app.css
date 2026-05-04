@@ -35,7 +35,7 @@ body {
 }
 
 header {
-  max-width: 1200px;
+  max-width: 1280px;
   margin: 0 auto;
   padding: 2rem 1.5rem 1rem;
 }
@@ -44,15 +44,15 @@ header h1 { font-size: 1.4rem; margin: 0 0 0.25rem; font-weight: 600; }
 .small { font-size: 0.85rem; }
 
 main {
-  max-width: 1200px;
+  max-width: 1280px;
   margin: 0 auto;
   padding: 0 1.5rem 3rem;
   display: grid;
-  grid-template-columns: minmax(320px, 420px) 1fr;
+  grid-template-columns: minmax(360px, 460px) 1fr;
   gap: 1.5rem;
   align-items: start;
 }
-@media (max-width: 880px) {
+@media (max-width: 920px) {
   main { grid-template-columns: 1fr; }
 }
 
@@ -72,16 +72,22 @@ main {
   margin: 0 0 1rem;
 }
 
-/* ---- Drops ---- */
-.drops {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+/* ---- Block headers (Scene / Reference) ---- */
+.scene-block, .ref-block { margin-bottom: 1rem; }
+.block-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 0.4rem;
 }
+.block-header .actions {
+  display: inline-flex; gap: 0.35rem;
+}
+.label { font-size: 0.85rem; font-weight: 600; }
+.label small { font-weight: 400; }
+.ref-block .label { display: block; margin-bottom: 0.4rem; }
+
+/* ---- Drops ---- */
 .drop {
   position: relative;
-  aspect-ratio: 4 / 3;
   border: 1.5px dashed var(--border);
   border-radius: 8px;
   display: flex;
@@ -94,20 +100,57 @@ main {
 }
 .drop:hover, .drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--bg)); }
 .drop input { display: none; }
-.drop img {
-  width: 100%; height: 100%; object-fit: cover; display: block;
-}
 .drop .placeholder {
   display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
-  color: var(--muted); text-align: center; padding: 0.5rem;
+  color: var(--muted); text-align: center; padding: 0.75rem;
 }
 .drop .placeholder svg { width: 28px; height: 28px; opacity: 0.6; }
 .drop .placeholder span { font-size: 0.9rem; font-weight: 600; color: var(--text); }
 .drop .placeholder small { font-size: 0.75rem; }
 
+.scene-drop { aspect-ratio: 16 / 10; }
+.ref-drop { aspect-ratio: 4 / 3; max-width: 220px; }
+
+/* When a scene is loaded, the drop becomes a drawing canvas. */
+.scene-drop.has-image {
+  cursor: crosshair;
+  border-style: solid;
+  background: var(--bg);
+  aspect-ratio: auto;
+}
+.scene-drop.has-image:hover { background: var(--bg); border-color: var(--border); }
+.scene-drop.has-image img.scene-img {
+  width: 100%; height: auto; display: block;
+}
+
+/* SVG overlay for polygon drawing — sits on top of scene-img. */
+.scene-drop .poly-overlay {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+.scene-drop .poly-overlay polygon,
+.scene-drop .poly-overlay polyline {
+  fill: color-mix(in srgb, var(--accent) 25%, transparent);
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.scene-drop .poly-overlay polyline { fill: none; stroke-dasharray: 4 4; }
+.scene-drop .poly-overlay circle {
+  fill: white;
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Reference image fills its drop. */
+.ref-drop img.ref-img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+
 /* ---- Fields ---- */
 .field { display: grid; gap: 0.35rem; margin-bottom: 0.85rem; }
-.field .label { font-size: 0.85rem; font-weight: 600; }
 .field .label small { font-weight: 400; }
 input[type=text], textarea {
   font: inherit;
@@ -131,13 +174,12 @@ textarea { resize: vertical; min-height: 4.5rem; font-family: inherit; }
   padding: 0.25rem 0; user-select: none;
 }
 .advanced summary:hover { color: var(--text); }
-.advanced[open] { padding-top: 0.5rem; }
 
 /* ---- Buttons ---- */
 button {
   font: inherit;
   font-weight: 600;
-  padding: 0.65rem 1rem;
+  padding: 0.5rem 0.85rem;
   border: 0;
   border-radius: 6px;
   background: var(--card);
@@ -159,6 +201,16 @@ button.primary {
   padding: 0.75rem 1rem;
 }
 button.primary:hover { background: var(--accent-hover); }
+
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 500;
+  padding: 0.3rem 0.6rem;
+  color: var(--muted);
+}
+button.ghost:hover { color: var(--text); border-color: var(--text); background: transparent; }
 
 .spinner {
   width: 14px; height: 14px;
@@ -199,7 +251,17 @@ button.primary:hover { background: var(--accent-hover); }
   text-align: center; padding: 1rem;
 }
 .canvas .empty-state svg { width: 36px; height: 36px; opacity: 0.4; }
-.canvas .empty-state p { margin: 0; }
+.canvas .empty-state p { margin: 0; max-width: 360px; }
+
+.mask-row {
+  display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem;
+}
+.mask-row img {
+  width: 96px; height: 60px; object-fit: contain;
+  background: black;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
 
 #refine {
   display: flex; gap: 0.5rem; margin-bottom: 1.25rem;

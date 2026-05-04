@@ -9,27 +9,42 @@
 <body>
   <header>
     <h1>image-ai-edit</h1>
-    <p class="muted">Place a reference object into a scene photo. Powered by Gemini 2.5 Flash Image.</p>
+    <p class="muted">Place a reference object into a scene photo. Optionally draw a polygon to constrain where it goes.</p>
   </header>
 
   <main>
-    <!-- Left column: inputs -->
+    <!-- Left column: scene + reference uploads -->
     <section class="inputs card">
       <h2>Inputs</h2>
 
-      <div class="drops">
-        <div class="drop" data-target="scene">
+      <!-- Scene block: drop zone collapses into the polygon canvas once an image is loaded -->
+      <div class="scene-block">
+        <div class="block-header">
+          <span class="label">Scene</span>
+          <span class="actions" hidden>
+            <button type="button" class="ghost" id="clear-poly" title="Remove all polygon points">Clear region</button>
+            <button type="button" class="ghost" id="undo-poly" title="Remove the last polygon point">Undo</button>
+            <button type="button" class="ghost" id="replace-scene" title="Choose a different scene">Replace</button>
+          </span>
+        </div>
+        <div class="drop scene-drop" data-target="scene">
           <span class="placeholder">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h18v14H3z"/><circle cx="8" cy="10" r="1.5"/><path d="M21 17l-6-6-8 8"/></svg>
-            <span>Scene</span>
+            <span>Drop scene</span>
             <small>The photo to edit into</small>
           </span>
           <input type="file" name="scene" accept="image/*" />
         </div>
-        <div class="drop" data-target="reference">
+        <p id="poly-hint" class="muted small" hidden>Click on the scene to add polygon vertices. Need ≥3 to define a region. Leave empty to let the model choose placement.</p>
+      </div>
+
+      <!-- Reference block: simple drop -->
+      <div class="ref-block">
+        <span class="label">Reference</span>
+        <div class="drop ref-drop" data-target="reference">
           <span class="placeholder">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2v20M2 12h20"/></svg>
-            <span>Reference</span>
+            <span>Drop reference</span>
             <small>The object to insert</small>
           </span>
           <input type="file" name="reference" accept="image/*" />
@@ -67,8 +82,13 @@
       <div id="canvas" class="canvas empty">
         <div class="empty-state muted">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-6"/></svg>
-          <p>Drop a scene + reference and hit Generate.</p>
+          <p>Drop a scene + reference, optionally draw a region, hit Generate.</p>
         </div>
+      </div>
+
+      <div id="mask-row" class="mask-row" hidden>
+        <span class="muted small">Mask sent to model:</span>
+        <img id="mask-preview" alt="rasterized mask" />
       </div>
 
       <form id="refine" hidden>
