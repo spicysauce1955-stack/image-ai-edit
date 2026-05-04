@@ -54,10 +54,9 @@
       <!-- Mode picker -->
       <div class="field">
         <span class="label">Mode</span>
-        <div class="modes" role="radiogroup" aria-label="Placement mode">
-          <label class="mode-pill"><input type="radio" name="mode" value="free" checked /><span><strong>Free</strong><small>Model picks placement.<br/>Polygon ignored.</small></span></label>
-          <label class="mode-pill"><input type="radio" name="mode" value="mask" /><span><strong>Mask</strong><small>Polygon → binary mask.<br/>White = place here.</small></span></label>
-          <label class="mode-pill"><input type="radio" name="mode" value="overlay" /><span><strong>Overlay</strong><small>Reference is pre-placed<br/>inside the polygon.</small></span></label>
+        <div class="modes modes-2" role="radiogroup" aria-label="Placement mode">
+          <label class="mode-pill"><input type="radio" name="mode" value="free" checked /><span><strong>Free</strong><small>Gemini picks placement.<br/>Polygon ignored.</small></span></label>
+          <label class="mode-pill"><input type="radio" name="mode" value="mask" /><span><strong>Mask</strong><small>FLUX-Kontext inpaint.<br/>Hard polygon constraint.</small></span></label>
         </div>
       </div>
 

@@ -16,8 +16,8 @@ Endpoints
     One-shot fetches for the bytes referenced from the JSON envelope.
 
 ``GET /api/defaults``
-    Default system prompts for the four modes (free / mask / overlay /
-    refine). Used by the UI to pre-fill the system-prompt textarea.
+    Default system prompts for free / mask / refine. Used by the UI
+    to pre-fill the system-prompt textarea.
 
 ``GET /healthz``
     Liveness probe.
@@ -45,9 +45,7 @@ from ..pipeline import insert_object
 from ..pipeline.insert import (
     DEFAULT_FREE_PROMPT,
     DEFAULT_MASK_PROMPT,
-    DEFAULT_OVERLAY_PROMPT,
     DEFAULT_REFINE_PROMPT,
-    Mode,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -57,8 +55,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 class _CachedResult:
     composite_bytes: bytes
     composite_mime: str
-    aux_bytes: bytes  # mask or overlay bytes; empty for free / refine
-    aux_kind: str | None  # "mask" | "overlay" | None
+    aux_bytes: bytes  # the binary mask; empty for free / refine
+    aux_kind: str | None  # "mask" | None
 
 
 _RESULT_CACHE: dict[str, _CachedResult] = {}
@@ -106,7 +104,7 @@ def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
     return points
 
 
-VALID_MODES: set[str] = {"free", "mask", "overlay"}
+VALID_MODES: set[str] = {"free", "mask"}
 
 
 def create_app() -> FastAPI:
@@ -125,15 +123,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/defaults")
     async def defaults() -> dict[str, str]:
-        """Default system prompts for each mode + refinement.
-
-        The UI fetches this once at load time to pre-fill the
-        system-prompt textarea and to "Reset to default" on demand.
-        """
+        """Default system prompts for each mode + refinement."""
         return {
             "free": DEFAULT_FREE_PROMPT,
             "mask": DEFAULT_MASK_PROMPT,
-            "overlay": DEFAULT_OVERLAY_PROMPT,
             "refine": DEFAULT_REFINE_PROMPT,
         }
 
@@ -153,8 +146,9 @@ def create_app() -> FastAPI:
         """Run the insertion pipeline.
 
         Required: ``scene``, ``reference``, ``instruction``.
-        Mode: ``free`` (default), ``mask``, ``overlay``. ``mask`` and
-        ``overlay`` require a polygon.
+        Mode: ``free`` (default, Gemini picks placement) or ``mask``
+        (FLUX-Kontext-LoRA inpaint, hard polygon constraint).
+        ``mask`` requires a polygon.
 
         Returns a JSON envelope with one-shot URLs for the composite
         and (when relevant) the auxiliary image actually sent to the
@@ -165,9 +159,9 @@ def create_app() -> FastAPI:
                 status_code=400, detail=f"Unknown mode: {mode!r}. Try {sorted(VALID_MODES)}."
             )
         polygon_pts = _parse_polygon(polygon)
-        if mode in ("mask", "overlay") and not polygon_pts:
+        if mode == "mask" and not polygon_pts:
             raise HTTPException(
-                status_code=400, detail=f"mode={mode!r} requires a polygon (≥3 vertices)."
+                status_code=400, detail="mode='mask' requires a polygon (≥3 vertices)."
             )
 
         scene_bytes = await scene.read()

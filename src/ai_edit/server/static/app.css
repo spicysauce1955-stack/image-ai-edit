@@ -184,6 +184,7 @@ textarea { resize: vertical; min-height: 4.5rem; font-family: inherit; }
   grid-template-columns: repeat(3, 1fr);
   gap: 0.4rem;
 }
+.modes-2 { grid-template-columns: repeat(2, 1fr); }
 .mode-pill {
   position: relative;
   cursor: pointer;

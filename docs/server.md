@@ -32,10 +32,10 @@ Or directly:
 |---|---|---|
 | `GET` | `/` | Drag-drop upload UI |
 | `GET` | `/static/*` | CSS / JS for the UI |
-| `GET` | `/api/defaults` | Default system prompts for `free` / `mask` / `overlay` / `refine`. |
+| `GET` | `/api/defaults` | Default system prompts for `free` / `mask` / `refine`. |
 | `POST` | `/api/insert` | Run the pipeline. Returns a JSON envelope with one-shot URLs. |
 | `GET` | `/api/result/{token}/composite.png` | Composite bytes referenced from the JSON above. |
-| `GET` | `/api/result/{token}/aux.png` | Aux image bytes (mask or overlay) — only when the request used `mask` or `overlay` mode. |
+| `GET` | `/api/result/{token}/aux.png` | Binary mask bytes — only when the request used `mask` mode. |
 | `GET` | `/healthz` | Liveness probe |
 | `GET` | `/docs` | Auto-generated OpenAPI docs |
 
@@ -53,7 +53,7 @@ Optional fields:
 
 | Field | Type | Notes |
 |---|---|---|
-| `mode` | string | `free` (default) / `mask` / `overlay`. Controls what (if anything) the server builds as image 3 to Gemini. `mask` and `overlay` require a polygon. |
+| `mode` | string | `free` (default) — Gemini picks placement. `mask` — FLUX-Kontext-LoRA Inpaint via fal.ai with the polygon as a hard alpha constraint. `mask` requires a polygon. |
 | `polygon` | string | JSON list of normalized `[u, v]` vertices in `[0, 1]`, e.g. `[[0.05,0.4],[0.55,0.35],[0.55,0.85],[0.05,0.9]]`. ≥3 vertices required. |
 | `system_prompt` | string | Override the mode's default system prompt. Empty = use the default for the active mode (see `GET /api/defaults`). |
 | `previous` | file | A previous composite from this conversation. When set the call switches into refinement mode regardless of `mode`. |
@@ -62,9 +62,8 @@ Optional fields:
 
 **Modes**
 
-- `free` — no polygon used. Gemini chooses placement from the prompt + scene.
-- `mask` — polygon → binary PNG (white = "place here", black = "preserve") sent to Gemini as image 3.
-- `overlay` — polygon → a copy of the scene with the reference *pre-placed* inside the polygon (Pillow paste + polygon clip), sent to Gemini as image 3 to clean up. Useful when you want stronger spatial guidance than a flat mask.
+- `free` — no polygon used. Gemini 2.5 Flash Image chooses placement from prompt + scene. Best when you don't have strong opinions about where the object goes.
+- `mask` — polygon rasterized to a binary PNG (white = fill, black = preserve) and routed through **`fal-ai/flux-kontext-lora/inpaint`**, which takes ``image_url`` + ``mask_url`` + ``reference_image_url`` + ``prompt`` natively. The mask is a **hard alpha constraint** — pixels outside the polygon are preserved (verified ~99.8% pixel-equality outside the mask in our fence-into-yard test).
 
 Response: a JSON envelope.
 
@@ -72,7 +71,7 @@ Response: a JSON envelope.
 {
   "composite_url": "http://.../api/result/<token>/composite.png",
   "aux_url":       "http://.../api/result/<token>/aux.png",  // null when free / refine
-  "aux_kind":      "mask" | "overlay" | null,
+  "aux_kind":      "mask" | null,
   "text":          ""                                         // any commentary from Gemini
 }
 ```
@@ -97,15 +96,6 @@ curl -sS -X POST http://127.0.0.1:8000/api/insert \
   -F "reference=@fence.jpg" \
   -F "instruction=place this fence inside the marked region" \
   -F "mode=mask" \
-  -F 'polygon=[[0.05,0.4],[0.55,0.35],[0.55,0.85],[0.05,0.9]]'
-
-# overlay mode — polygon becomes a pre-placed paste of the reference,
-# Gemini's job is to blend it cleanly
-curl -sS -X POST http://127.0.0.1:8000/api/insert \
-  -F "scene=@yard.png" \
-  -F "reference=@fence.jpg" \
-  -F "instruction=blend the pre-placed fence into the scene" \
-  -F "mode=overlay" \
   -F 'polygon=[[0.05,0.4],[0.55,0.35],[0.55,0.85],[0.05,0.9]]'
 
 # custom system prompt override
@@ -162,7 +152,7 @@ After the scene is loaded, the drop turns into a polygon-drawing canvas — clic
 
 Below the inputs there are two configurable bits:
 
-- **Mode** (Free / Mask / Overlay) as a segmented radio group. Mask + Overlay require a polygon and are validated client-side before submit.
+- **Mode** (Free / Mask) as a segmented radio group. Mask requires a polygon and is validated client-side before submit.
 - **System prompt** in a collapsible — pre-filled with the active mode's default (fetched once from `/api/defaults` at load), with a "Reset to default" button. The textarea tracks a `dirty` flag so changing modes only replaces the contents when the user hasn't edited it.
 
 If we want a richer frontend (auth, multi-tenant, persisted history), this is the wrong layer to grow it from; build a separate frontend (Next.js etc.) and call `/api/insert` from there.

@@ -3,8 +3,8 @@
 // State (module-local):
 //   sceneFile / referenceFile : the two input files
 //   polygonPoints             : [[u, v], ...] in [0, 1] — the drawn region
-//   defaults                  : { free, mask, overlay, refine } system prompts
-//   currentMode               : "free" | "mask" | "overlay"
+//   defaults                  : { free, mask, refine } system prompts
+//   currentMode               : "free" | "mask"
 //   promptDirty               : true if the user manually edited the system prompt
 //   lastComposite             : Blob of the most recent composite (used by refine)
 //   history                   : [{ blob, label, kind: 'initial'|'refine', url }]
@@ -52,7 +52,7 @@ let polygonPoints = [];
 let lastComposite = null;
 const history = [];
 
-let defaults = { free: '', mask: '', overlay: '', refine: '' };
+let defaults = { free: '', mask: '', refine: '' };
 let currentMode = 'free';
 let promptDirty = false;
 
@@ -213,9 +213,7 @@ function renderResult(blob, label, kind, auxUrl, auxKind) {
   canvasEl.innerHTML = `<img src="${url}" alt="composite" />`;
   if (auxUrl && auxKind) {
     auxImg.src = auxUrl;
-    auxLabel.textContent = auxKind === 'mask'
-      ? 'Mask sent to model:'
-      : 'Overlay sent to model:';
+    auxLabel.textContent = 'Mask sent to model:';
     auxRow.hidden = false;
   } else {
     auxRow.hidden = true;
@@ -297,8 +295,8 @@ generateBtn.addEventListener('click', () => {
     setStatus('Add an instruction.', true);
     return;
   }
-  if ((currentMode === 'mask' || currentMode === 'overlay') && polygonPoints.length < 3) {
-    setStatus(`${currentMode} mode needs a polygon — click 3+ points on the scene.`, true);
+  if (currentMode === 'mask' && polygonPoints.length < 3) {
+    setStatus('mask mode needs a polygon — click 3+ points on the scene.', true);
     return;
   }
   history.length = 0;
