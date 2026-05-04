@@ -1,17 +1,18 @@
 // image-ai-edit web UI
 //
-// Single-page client. State lives in this module:
-//   - sceneFile / referenceFile : the two input files (set via drag-drop or click)
-//   - polygonPoints             : array of [u, v] in [0, 1] — the drawn region
-//   - lastComposite             : Blob of the most recent composite (for refine)
-//   - history                   : array of {blob, label, kind: 'initial'|'refine'}
-//
-// The polygon is stored in normalized image coordinates so window
-// resizes during drawing don't invalidate the points. The server
-// rasterizes them to a binary PNG matching the scene's pixel dims.
+// State (module-local):
+//   sceneFile / referenceFile : the two input files
+//   polygonPoints             : [[u, v], ...] in [0, 1] — the drawn region
+//   defaults                  : { free, mask, overlay, refine } system prompts
+//   currentMode               : "free" | "mask" | "overlay"
+//   promptDirty               : true if the user manually edited the system prompt
+//   lastComposite             : Blob of the most recent composite (used by refine)
+//   history                   : [{ blob, label, kind: 'initial'|'refine', url }]
 
 const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+// --- DOM
 const sceneDrop      = $('.drop[data-target=scene]');
 const referenceDrop  = $('.drop[data-target=reference]');
 const sceneInput     = $('input', sceneDrop);
@@ -22,6 +23,12 @@ const clearPolyBtn   = $('#clear-poly');
 const undoPolyBtn    = $('#undo-poly');
 const replaceSceneBtn = $('#replace-scene');
 
+const modeRadios     = $$('input[name=mode]');
+const promptDetails  = $('#prompt-details');
+const promptModeTag  = $('#prompt-mode-tag');
+const promptArea     = $('#system-prompt');
+const resetPromptBtn = $('#reset-prompt');
+
 const instructionEl  = $('#instruction');
 const segmentEl      = $('#segment');
 const relightEl      = $('#relight');
@@ -31,33 +38,47 @@ const spinner        = $('.spinner', generateBtn);
 const statusEl       = $('#status');
 
 const canvasEl       = $('#canvas');
-const maskRow        = $('#mask-row');
-const maskImg        = $('#mask-preview');
+const auxRow         = $('#aux-row');
+const auxLabel       = $('#aux-label');
+const auxImg         = $('#aux-preview');
 const refineForm     = $('#refine');
 const refineInput    = $('#refine-input');
 const historyList    = $('#history-list');
 
+// --- State
 let sceneFile = null;
 let referenceFile = null;
-let polygonPoints = [];   // [[u, v], ...] in [0, 1]
+let polygonPoints = [];
 let lastComposite = null;
 const history = [];
 
-// ----- Reference drop (simple) -----
+let defaults = { free: '', mask: '', overlay: '', refine: '' };
+let currentMode = 'free';
+let promptDirty = false;
+
+// --- Defaults bootstrap
+fetch('/api/defaults')
+  .then((r) => r.json())
+  .then((d) => {
+    defaults = d;
+    syncSystemPrompt(); // fill the textarea now that defaults arrived
+  })
+  .catch(() => setStatus('Could not load default prompts.', true));
+
+// --- File drops
 bindFileDrop(referenceDrop, referenceInput, (file) => {
   referenceFile = file;
   const url = URL.createObjectURL(file);
   referenceDrop.innerHTML = `<img class="ref-img" src="${url}" alt="" />`;
 });
 
-// ----- Scene drop -----
 bindFileDrop(sceneDrop, sceneInput, (file) => {
   sceneFile = file;
   loadSceneEditor(file);
 });
 
 function bindFileDrop(drop, input, onFile) {
-  drop.addEventListener('click', (e) => {
+  drop.addEventListener('click', () => {
     if (drop.classList.contains('has-image')) return; // clicks become poly vertices
     input.click();
   });
@@ -73,7 +94,7 @@ function bindFileDrop(drop, input, onFile) {
   });
 }
 
-// ----- Scene editor (image + polygon overlay) -----
+// --- Scene editor (image + polygon overlay)
 function loadSceneEditor(file) {
   const url = URL.createObjectURL(file);
   sceneDrop.classList.add('has-image');
@@ -86,13 +107,10 @@ function loadSceneEditor(file) {
   const img = sceneDrop.querySelector('img');
   img.addEventListener('load', () => {
     const svg = sceneDrop.querySelector('svg');
-    // Use the natural image dims as the SVG viewBox so SVG coords map
-    // straight to image pixels — drawing math stays simple.
     svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
     redrawPolygon();
   });
 
-  // Reset any previous polygon when a new scene is loaded.
   polygonPoints = [];
   redrawPolygon();
 }
@@ -136,19 +154,46 @@ function redrawPolygon() {
   const pts = polygonPoints.map(([u, v]) => `${u * W},${v * H}`).join(' ');
 
   let body = '';
-  if (polygonPoints.length >= 3) {
-    body += `<polygon points="${pts}" />`;
-  } else if (polygonPoints.length >= 2) {
-    body += `<polyline points="${pts}" />`;
-  }
-  // Draw vertex handles last so they sit on top.
+  if (polygonPoints.length >= 3) body += `<polygon points="${pts}" />`;
+  else if (polygonPoints.length >= 2) body += `<polyline points="${pts}" />`;
   for (const [u, v] of polygonPoints) {
     body += `<circle cx="${u * W}" cy="${v * H}" r="${Math.max(W, H) / 200}" />`;
   }
   svg.innerHTML = body;
 }
 
-// ----- Generate / refine -----
+// --- Mode + system prompt
+modeRadios.forEach((r) => {
+  r.addEventListener('change', () => {
+    if (!r.checked) return;
+    currentMode = r.value;
+    promptModeTag.textContent = `(${currentMode})`;
+    syncSystemPrompt();
+  });
+});
+
+promptArea.addEventListener('input', () => {
+  // Mark the prompt as dirty unless the user is actively typing the
+  // exact default — then leave it pristine so future mode switches
+  // can replace it cleanly.
+  promptDirty = promptArea.value.trim() !== (defaults[currentMode] || '').trim();
+});
+
+resetPromptBtn?.addEventListener('click', () => {
+  promptArea.value = defaults[currentMode] || '';
+  promptDirty = false;
+  promptArea.focus();
+});
+
+function syncSystemPrompt() {
+  // Replace textarea contents with the active mode's default unless
+  // the user has manually edited — in which case leave their text
+  // alone (they can hit "Reset to default" if they want).
+  if (promptDirty) return;
+  promptArea.value = defaults[currentMode] || '';
+}
+
+// --- Generate / refine
 function setBusy(busy) {
   generateBtn.disabled = busy;
   refineForm.querySelector('button').disabled = busy;
@@ -162,16 +207,19 @@ function setStatus(msg, isError = false) {
   statusEl.classList.toggle('err', !!isError);
 }
 
-function renderResult(blob, label, kind, maskUrl) {
+function renderResult(blob, label, kind, auxUrl, auxKind) {
   const url = URL.createObjectURL(blob);
   canvasEl.classList.remove('empty');
   canvasEl.innerHTML = `<img src="${url}" alt="composite" />`;
-  if (maskUrl) {
-    maskImg.src = maskUrl;
-    maskRow.hidden = false;
+  if (auxUrl && auxKind) {
+    auxImg.src = auxUrl;
+    auxLabel.textContent = auxKind === 'mask'
+      ? 'Mask sent to model:'
+      : 'Overlay sent to model:';
+    auxRow.hidden = false;
   } else {
-    maskRow.hidden = true;
-    maskImg.removeAttribute('src');
+    auxRow.hidden = true;
+    auxImg.removeAttribute('src');
   }
   refineForm.hidden = false;
   refineInput.focus();
@@ -207,7 +255,7 @@ function renderHistory() {
 
 async function callPipeline(formData, kind) {
   setBusy(true);
-  setStatus('Running pipeline… (~10–20s)');
+  setStatus('Running pipeline… (~10–30s)');
   const t0 = performance.now();
   try {
     const res = await fetch('/api/insert', { method: 'POST', body: formData });
@@ -216,8 +264,6 @@ async function callPipeline(formData, kind) {
       throw new Error(`HTTP ${res.status}: ${detail}`);
     }
     const json = await res.json();
-
-    // Fetch the actual image from the one-shot URL the server issued.
     const compositeRes = await fetch(json.composite_url);
     if (!compositeRes.ok) throw new Error('composite fetch failed');
     const blob = await compositeRes.blob();
@@ -228,7 +274,7 @@ async function callPipeline(formData, kind) {
     const label = kind === 'initial'
       ? truncate(instructionEl.value, 60)
       : truncate(refineInput.value, 60);
-    renderResult(blob, label, kind, json.mask_url);
+    renderResult(blob, label, kind, json.aux_url, json.aux_kind);
     if (kind === 'refine') refineInput.value = '';
   } catch (err) {
     setStatus(String(err.message || err), true);
@@ -251,14 +297,22 @@ generateBtn.addEventListener('click', () => {
     setStatus('Add an instruction.', true);
     return;
   }
+  if ((currentMode === 'mask' || currentMode === 'overlay') && polygonPoints.length < 3) {
+    setStatus(`${currentMode} mode needs a polygon — click 3+ points on the scene.`, true);
+    return;
+  }
   history.length = 0;
   lastComposite = null;
   const fd = new FormData();
   fd.append('scene', sceneFile);
   fd.append('reference', referenceFile);
   fd.append('instruction', instructionEl.value);
+  fd.append('mode', currentMode);
   if (polygonPoints.length >= 3) {
     fd.append('polygon', JSON.stringify(polygonPoints));
+  }
+  if (promptDirty && promptArea.value.trim()) {
+    fd.append('system_prompt', promptArea.value);
   }
   if (segmentEl.value.trim()) fd.append('segment', segmentEl.value);
   if (relightEl.value.trim()) fd.append('relight', relightEl.value);
@@ -278,7 +332,7 @@ refineForm.addEventListener('submit', (e) => {
   fd.append('reference', referenceFile);
   fd.append('instruction', refineInput.value);
   fd.append('previous', lastComposite, 'previous.png');
-  // Refine intentionally drops the polygon — refinement is about
-  // iterating on a result, not re-specifying the placement region.
+  // Refinement explicitly drops mode + polygon + custom prompt —
+  // refinement uses the refine system prompt regardless.
   callPipeline(fd, 'refine');
 });

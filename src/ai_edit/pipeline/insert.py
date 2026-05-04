@@ -4,40 +4,53 @@ Glues the providers together into the insertion pipeline:
 
 ::
 
-    scene + reference + instruction + (optional) polygon
+    scene + reference + instruction + (mode, polygon, system_prompt)
         │
         ├─► (optional) Replicate · Grounded-SAM
         │       → masks dumped for inspection only
         │
         ├─► Gemini · 2.5 Flash Image
-        │       inputs: [scene, reference, mask?]
+        │       inputs: [scene, reference, aux?]
         │       output: raw composite
         │
         └─► (optional) fal.ai · IC-Light v2
                 relit composite
 
-Region / mask handling
-----------------------
-The user can constrain the placement to a polygon they draw in the UI.
-The polygon arrives as a list of normalized ``(u, v)`` pairs in
-``[0, 1]`` (so window resizes mid-draw don't matter). We rasterize it
-via Pillow into a binary PNG matching the scene's natural pixel
-dimensions, then pass that mask to Gemini as a third image and switch
-the prompt into mask-aware mode.
+Placement modes
+---------------
+The user picks one of three modes per request. The mode controls
+*what* gets sent to Gemini as the (optional) third image and *how* the
+prompt frames it:
 
-Gemini does not consume a literal mask channel — only multi-image
-conditioning + prompt — so the mask is *strong guidance*, not a hard
-constraint. For a true alpha mask channel the next move is gpt-image-1
-(see ``docs/contributing.md`` for the swap recipe); the existing
-``mask_polygon`` argument carries straight over because it lives in
-this orchestration layer rather than in the provider.
+- ``"free"`` — no polygon, no third image. Gemini chooses placement.
+- ``"mask"`` — polygon → binary PNG (white = place here, black =
+  preserve), sent as image 3 with mask-aware prompt language.
+- ``"overlay"`` — polygon → a copy of the scene with the reference
+  *pre-placed* inside the polygon shape (Pillow paste + polygon clip),
+  sent as image 3 with "clean this up" prompt language.
 
-Important POC semantics for Grounded-SAM
-----------------------------------------
-The masks returned by Grounded-SAM are saved on the result for
-inspection but **not** fed into Gemini. The user-drawn mask is the
-authoritative signal; segmentation is only there if you want to
-eyeball whether scene parsing is doing what you expect.
+Refinement mode (``previous_composite`` set) is orthogonal — it always
+overrides the placement mode because refinement is about iterating on
+a result rather than re-specifying the placement region.
+
+System prompt
+-------------
+Each mode has a default system prompt template exposed as a constant
+below and via :func:`default_system_prompt`. Callers can override the
+template per request by passing ``system_prompt=...``; the user's
+``instruction`` is concatenated with the chosen template to form the
+full prompt sent to Gemini. The ``/api/defaults`` server endpoint
+serves these defaults to the UI so the textarea can show them.
+
+Gemini and "literal" masks
+--------------------------
+Gemini 2.5 Flash Image does not consume a literal alpha mask channel
+— only multi-image conditioning + prompt text. So both mask and
+overlay modes are *strong guidance*, not hard constraints. For a hard
+alpha mask the next move is gpt-image-1 (see
+``docs/contributing.md`` for the swap recipe); the existing
+``mask_polygon`` carries straight over because rasterization happens
+in this orchestration layer rather than in the provider.
 """
 
 from __future__ import annotations
@@ -46,11 +59,88 @@ import io
 import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from PIL import Image, ImageDraw
 
 from ..models.base import SegmentationMask
 from ..providers import FalAI, Gemini, Replicate
+
+Mode = Literal["free", "mask", "overlay"]
+AuxKind = Literal["mask", "overlay", "previous"]
+
+
+# ---------------------------------------------------------------------------
+# Default system prompts — the part appended after the user's instruction.
+# ---------------------------------------------------------------------------
+
+DEFAULT_FREE_PROMPT = (
+    "Image 1 is the scene. Image 2 is the reference object to insert. "
+    "Place the object photorealistically in the scene: respect the existing "
+    "ground plane, perspective, and occlusion (objects in front of the "
+    "inserted region must remain in front). Match the scene's lighting: "
+    "infer the sun direction from the existing shadows in image 1, then "
+    "shade the inserted object accordingly and cast a soft, realistic "
+    "ground shadow underneath it that falls in the same direction as the "
+    "other shadows in the scene. Preserve the object's exact shape, color, "
+    "material, and texture from image 2 — do not restyle or regenerate "
+    "the object. Output only the final composited image."
+)
+
+DEFAULT_MASK_PROMPT = (
+    "Image 1 is the scene. Image 2 is the reference object to insert. "
+    "Image 3 is a binary mask the user drew on the scene: WHITE pixels "
+    "mark the exact region where the reference object should be placed; "
+    "BLACK pixels must remain unchanged from image 1. Place the object "
+    "photorealistically inside the white region, respecting perspective "
+    "and the existing ground plane. Preserve the object's exact shape, "
+    "color, material, and texture from image 2 — do not restyle or "
+    "regenerate it. Match the scene's lighting: infer the sun direction "
+    "from the existing shadows in image 1, then shade the inserted "
+    "object accordingly and cast a soft, realistic ground shadow "
+    "consistent with that direction. Foreground objects in image 1 "
+    "that visually overlap the white region must remain in front of "
+    "the inserted object. Output only the final composited image."
+)
+
+DEFAULT_OVERLAY_PROMPT = (
+    "Image 1 is the original scene. Image 2 is the reference object. "
+    "Image 3 is image 1 with the reference roughly pre-placed inside the "
+    "region the user drew. Treat image 3 as a placement hint: keep the "
+    "object exactly where it appears in image 3, but blend it into the "
+    "scene photorealistically. Smooth the seams between the inserted "
+    "object and the surrounding scene. Match the scene's lighting and "
+    "shadow direction from image 1; cast a soft realistic ground shadow "
+    "under the object. Preserve the object's exact shape, color, "
+    "material, and texture from image 2 — do not restyle or regenerate "
+    "it. Foreground objects in image 1 that overlap the placement "
+    "region must remain in front of the inserted object. Output only "
+    "the final composited image."
+)
+
+DEFAULT_REFINE_PROMPT = (
+    "Image 1 is the original scene. Image 2 is the reference object. "
+    "Image 3 is your previous attempt at the composite. Apply the user's "
+    "refinement to image 3 — do not restart from scratch. Preserve "
+    "everything that is already correct: object appearance from image 2, "
+    "scene lighting and shadow direction from image 1, occlusion of "
+    "foreground objects, and overall composition. Only change what the "
+    "refinement explicitly asks for. Output only the updated composite."
+)
+
+
+def default_system_prompt(mode: Mode | Literal["refine"]) -> str:
+    """Return the default system prompt for a given mode.
+
+    Used both at request time (when the caller didn't pass an override)
+    and by the ``/api/defaults`` endpoint that pre-fills the UI.
+    """
+    return {
+        "free": DEFAULT_FREE_PROMPT,
+        "mask": DEFAULT_MASK_PROMPT,
+        "overlay": DEFAULT_OVERLAY_PROMPT,
+        "refine": DEFAULT_REFINE_PROMPT,
+    }[mode]
 
 
 @dataclass
@@ -59,28 +149,51 @@ class InsertResult:
 
     ``composite_bytes`` is the final image the caller should display —
     it equals ``composite_bytes_relit`` when the relight pass ran, else
-    ``composite_bytes_raw``. ``mask_bytes`` is the rasterized polygon
-    mask that was sent to Gemini (empty when no polygon was drawn);
-    surfaced so the UI can show it next to the result for inspection.
+    ``composite_bytes_raw``.
+
+    ``aux_bytes`` / ``aux_kind`` describe the *third image* sent to
+    Gemini: a binary mask (mask mode), a pre-placed overlay (overlay
+    mode), or the previous composite (refinement). Empty / ``None``
+    when the call was a plain free-mode initial generation.
     """
 
     composite_bytes: bytes
     composite_mime: str
     composite_bytes_raw: bytes = b""
     composite_bytes_relit: bytes = b""
-    mask_bytes: bytes = b""
+    aux_bytes: bytes = b""
+    aux_kind: AuxKind | None = None
     masks: list[SegmentationMask] = field(default_factory=list)
     text: str = ""
 
 
-def _guess_mime(path: Path) -> str:
-    """Best-effort MIME detection from filename extension.
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    Falls back to ``image/jpeg`` because that's the most common phone
-    camera output and Gemini handles it without complaint.
-    """
+def _guess_mime(path: Path) -> str:
+    """MIME from extension; ``image/jpeg`` fallback (most common phone output)."""
     mime, _ = mimetypes.guess_type(path.name)
     return mime or "image/jpeg"
+
+
+def _polygon_to_pixels(
+    polygon_norm: list[tuple[float, float]],
+    width: int,
+    height: int,
+) -> list[tuple[int, int]]:
+    """Project normalized ``(u, v)`` vertices onto pixel coords + clamp.
+
+    Clamping is defensive: the UI keeps points in range but a
+    malformed payload shouldn't crash the rasterizer.
+    """
+    return [
+        (
+            max(0, min(width - 1, round(u * width))),
+            max(0, min(height - 1, round(v * height))),
+        )
+        for u, v in polygon_norm
+    ]
 
 
 def _rasterize_polygon(
@@ -89,55 +202,98 @@ def _rasterize_polygon(
 ) -> bytes:
     """Turn a normalized polygon into a binary PNG mask.
 
-    Parameters
-    ----------
-    scene_bytes:
-        The scene image bytes — used only to read the natural pixel
-        dimensions so the mask comes out the same size.
-    polygon_norm:
-        Vertices as ``(u, v)`` pairs with ``u, v ∈ [0, 1]``.
-
-    Returns
-    -------
-    bytes
-        A PNG of mode ``L`` (single channel, 0–255) where white pixels
-        mark the region the user drew. Same width/height as the scene.
-
-    Raises
-    ------
-    ValueError:
-        If the polygon has fewer than 3 vertices (Pillow accepts 2 but
-        the result isn't a region).
+    White inside the polygon, black outside. Same width/height as the
+    scene so the mask aligns pixel-for-pixel.
     """
     if len(polygon_norm) < 3:
-        raise ValueError(
-            f"Polygon needs at least 3 vertices, got {len(polygon_norm)}."
-        )
+        raise ValueError(f"Polygon needs at least 3 vertices, got {len(polygon_norm)}.")
 
     with Image.open(io.BytesIO(scene_bytes)) as scene:
         w, h = scene.size
 
-    # Clamp to the image bounds — UI should already do this, but a
-    # malformed payload shouldn't crash the rasterizer.
-    pixel_pts = [
-        (max(0, min(w - 1, round(u * w))), max(0, min(h - 1, round(v * h))))
-        for u, v in polygon_norm
-    ]
-
     mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).polygon(pixel_pts, fill=255)
+    ImageDraw.Draw(mask).polygon(_polygon_to_pixels(polygon_norm, w, h), fill=255)
 
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
     return buf.getvalue()
 
 
+def _build_overlay(
+    scene_bytes: bytes,
+    reference_bytes: bytes,
+    polygon_norm: list[tuple[float, float]],
+) -> bytes:
+    """Pre-place the reference inside the polygon for overlay mode.
+
+    Strategy: resize the reference to *cover* the polygon's bounding
+    box (preserving aspect ratio), centre-crop to the bounding box,
+    paste into a copy of the scene, then clip the result to the
+    polygon's exact shape via the binary mask. The output is the same
+    size as the scene and shows roughly where/how the reference
+    should appear.
+
+    Caveat: this is a bounding-box placement, not a perspective warp.
+    For 4-vertex polygons we could do a true perspective transform
+    via ``Image.transform(PERSPECTIVE, ...)``; that's a v2.
+    """
+    if len(polygon_norm) < 3:
+        raise ValueError(
+            f"Polygon needs at least 3 vertices, got {len(polygon_norm)}."
+        )
+
+    with Image.open(io.BytesIO(scene_bytes)) as raw_scene:
+        scene = raw_scene.convert("RGB")
+    with Image.open(io.BytesIO(reference_bytes)) as raw_ref:
+        # Force RGB — alpha would mean reference logos paste with
+        # transparency, which isn't useful for an opaque object.
+        reference = raw_ref.convert("RGB")
+
+    W, H = scene.size
+    pixel_pts = _polygon_to_pixels(polygon_norm, W, H)
+
+    xs = [p[0] for p in pixel_pts]
+    ys = [p[1] for p in pixel_pts]
+    bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
+    bw, bh = max(1, bx1 - bx0), max(1, by1 - by0)
+
+    # Cover-fit the reference to the bounding box, then centre-crop.
+    rw, rh = reference.size
+    scale = max(bw / rw, bh / rh)
+    new_w = max(1, round(rw * scale))
+    new_h = max(1, round(rh * scale))
+    ref_resized = reference.resize((new_w, new_h), Image.LANCZOS)
+    cx = (new_w - bw) // 2
+    cy = (new_h - bh) // 2
+    ref_cropped = ref_resized.crop((cx, cy, cx + bw, cy + bh))
+
+    # Paste into a copy of the scene at the bounding-box position.
+    overlay_full = scene.copy()
+    overlay_full.paste(ref_cropped, (bx0, by0))
+
+    # Clip the paste to the polygon's exact shape — outside the
+    # polygon stays as the original scene.
+    poly_mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(poly_mask).polygon(pixel_pts, fill=255)
+    final = Image.composite(overlay_full, scene, poly_mask)
+
+    buf = io.BytesIO()
+    final.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+
 async def insert_object(
     scene_path: str | Path,
     reference_path: str | Path,
     instruction: str,
     *,
+    mode: Mode = "free",
     mask_polygon: list[tuple[float, float]] | None = None,
+    system_prompt: str | None = None,
     previous_composite: bytes | None = None,
     previous_mime: str = "image/png",
     segmentation_prompts: list[str] | None = None,
@@ -150,44 +306,31 @@ async def insert_object(
 
     Parameters
     ----------
-    scene_path:
-        Path to the scene image (the photo we're editing into).
-    reference_path:
-        Path to the reference object image (what to insert).
+    scene_path, reference_path:
+        Paths to the scene image and the reference object image.
     instruction:
-        Free-form description of the desired edit, e.g.
-        ``"place this fence along the back edge of the lawn"``.
+        User's free-form description of the desired edit.
+    mode:
+        ``"free"`` (default), ``"mask"``, or ``"overlay"``. The latter
+        two require ``mask_polygon``. See module docstring for the
+        difference.
     mask_polygon:
-        Optional list of normalized ``(u, v)`` vertices in ``[0, 1]``
-        defining the region where the reference object should be
-        placed. When provided, the pipeline rasterizes the polygon
-        into a binary mask matching the scene's pixel dimensions and
-        passes it to Gemini as a third image, switching the prompt
-        into mask-aware mode.
-    previous_composite:
-        Optional bytes of a previous composite from this conversation.
-        When provided the call is treated as a *refinement turn*: the
-        previous composite is sent to Gemini as image 3, the prompt
-        switches into refinement mode, and Gemini edits it rather than
-        starting from scratch. Mutually exclusive with ``mask_polygon``
-        in practice — refinement is about iterating on a result, not
-        re-specifying the placement region. If both are provided the
-        refinement branch wins.
-    previous_mime:
-        MIME type of ``previous_composite``. Defaults to ``image/png``.
+        Optional list of normalized ``(u, v)`` vertices in ``[0, 1]``.
+        Required when ``mode != "free"``; ignored when ``mode ==
+        "free"``.
+    system_prompt:
+        Optional override for the mode's default system prompt. If
+        ``None`` the default for the active mode (or refinement, if
+        ``previous_composite`` is set) is used.
+    previous_composite, previous_mime:
+        When set, the call is treated as a refinement turn and ``mode``
+        is effectively ignored — the previous composite goes as image 3.
     segmentation_prompts:
-        Optional list of labels for Grounded-SAM. Masks are returned on
-        the result for inspection but NOT fed into Gemini.
+        Grounded-SAM labels for inspection (not fed to Gemini).
     relight_prompt:
         Optional IC-Light v2 prompt. Empty = skip relight.
     replicate, gemini, falai:
         Pre-built provider instances for dependency injection.
-
-    Returns
-    -------
-    InsertResult
-        See the dataclass for fields. ``mask_bytes`` is non-empty only
-        when ``mask_polygon`` was provided.
     """
     scene_path = Path(scene_path)
     reference_path = Path(reference_path)
@@ -205,62 +348,46 @@ async def insert_object(
         )
         masks = seg_resp.masks
 
-    # Build the prompt. Three mutually exclusive modes — refinement
-    # wins if both refinement and mask are passed (see docstring).
-    mask_bytes = b""
+    # ------------------------------------------------------------------
+    # Build the third image (if any) and pick the prompt template.
+    # Refinement is the highest-priority branch.
+    # ------------------------------------------------------------------
+    aux_bytes = b""
+    aux_mime = "image/png"
+    aux_kind: AuxKind | None = None
+    template_key: Mode | Literal["refine"]
+
     if previous_composite:
-        full_instruction = (
-            f"User refinement: {instruction}\n\n"
-            "Image 1 is the original scene. Image 2 is the reference object. "
-            "Image 3 is your previous attempt at the composite. "
-            "Apply the user's refinement to image 3 — do not restart from scratch. "
-            "Preserve everything that is already correct: object appearance from "
-            "image 2, scene lighting and shadow direction from image 1, occlusion "
-            "of foreground objects, and overall composition. Only change what the "
-            "refinement explicitly asks for. Output only the updated composite."
-        )
-    elif mask_polygon:
-        mask_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
-        full_instruction = (
-            f"{instruction}\n\n"
-            "Image 1 is the scene. Image 2 is the reference object to insert. "
-            "Image 3 is a binary mask the user drew on the scene: WHITE pixels "
-            "mark the exact region where the reference object should be placed; "
-            "BLACK pixels must remain unchanged from image 1. "
-            "Place the object photorealistically inside the white region, "
-            "respecting perspective and the existing ground plane. Preserve "
-            "the object's exact shape, color, material, and texture from "
-            "image 2 — do not restyle or regenerate it. Match the scene's "
-            "lighting: infer the sun direction from the existing shadows in "
-            "image 1, then shade the inserted object accordingly and cast a "
-            "soft, realistic ground shadow consistent with that direction. "
-            "Foreground objects in image 1 that visually overlap the white "
-            "region must remain in front of the inserted object. Output only "
-            "the final composited image."
-        )
+        template_key = "refine"
+        aux_bytes = previous_composite
+        aux_mime = previous_mime
+        aux_kind = "previous"
+    elif mode == "mask":
+        if not mask_polygon:
+            raise ValueError("mask mode requires a polygon (mask_polygon).")
+        aux_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
+        aux_mime = "image/png"
+        aux_kind = "mask"
+        template_key = "mask"
+    elif mode == "overlay":
+        if not mask_polygon:
+            raise ValueError("overlay mode requires a polygon (mask_polygon).")
+        aux_bytes = _build_overlay(scene_bytes, reference_bytes, mask_polygon)
+        aux_mime = "image/png"
+        aux_kind = "overlay"
+        template_key = "overlay"
     else:
-        full_instruction = (
-            f"{instruction}\n\n"
-            "Image 1 is the scene. Image 2 is the reference object to insert. "
-            "Place the object photorealistically in the scene: respect the existing "
-            "ground plane, perspective, and occlusion (objects in front of the "
-            "inserted region must remain in front). Match the scene's lighting: "
-            "infer the sun direction from the existing shadows in image 1, then "
-            "shade the inserted object accordingly and cast a soft, realistic "
-            "ground shadow underneath it that falls in the same direction as the "
-            "other shadows in the scene. Preserve the object's exact shape, "
-            "color, material, and texture from image 2 — do not restyle or "
-            "regenerate the object. Output only the final composited image."
-        )
+        template_key = "free"
+
+    template = system_prompt.strip() if system_prompt else default_system_prompt(template_key)
+    full_instruction = f"{instruction}\n\n{template}"
 
     images: list[tuple[bytes, str]] = [
         (scene_bytes, scene_mime),
         (reference_bytes, reference_mime),
     ]
-    if previous_composite:
-        images.append((previous_composite, previous_mime))
-    elif mask_bytes:
-        images.append((mask_bytes, "image/png"))
+    if aux_bytes:
+        images.append((aux_bytes, aux_mime))
 
     gem = gemini or Gemini()
     edit = await gem.image.edit(full_instruction, images)
@@ -283,7 +410,8 @@ async def insert_object(
         composite_mime=final_mime,
         composite_bytes_raw=raw_bytes,
         composite_bytes_relit=relit_bytes,
-        mask_bytes=mask_bytes,
+        aux_bytes=aux_bytes if aux_kind in ("mask", "overlay") else b"",
+        aux_kind=aux_kind if aux_kind in ("mask", "overlay") else None,
         masks=masks,
         text=edit.text,
     )

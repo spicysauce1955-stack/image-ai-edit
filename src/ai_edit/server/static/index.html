@@ -9,15 +9,15 @@
 <body>
   <header>
     <h1>image-ai-edit</h1>
-    <p class="muted">Place a reference object into a scene photo. Optionally draw a polygon to constrain where it goes.</p>
+    <p class="muted">Place a reference object into a scene photo. Optionally draw a polygon to constrain placement.</p>
   </header>
 
   <main>
-    <!-- Left column: scene + reference uploads -->
+    <!-- Left column: inputs -->
     <section class="inputs card">
       <h2>Inputs</h2>
 
-      <!-- Scene block: drop zone collapses into the polygon canvas once an image is loaded -->
+      <!-- Scene block -->
       <div class="scene-block">
         <div class="block-header">
           <span class="label">Scene</span>
@@ -35,10 +35,10 @@
           </span>
           <input type="file" name="scene" accept="image/*" />
         </div>
-        <p id="poly-hint" class="muted small" hidden>Click on the scene to add polygon vertices. Need ≥3 to define a region. Leave empty to let the model choose placement.</p>
+        <p id="poly-hint" class="muted small" hidden>Click on the scene to add polygon vertices. Need ≥3 to define a region.</p>
       </div>
 
-      <!-- Reference block: simple drop -->
+      <!-- Reference block -->
       <div class="ref-block">
         <span class="label">Reference</span>
         <div class="drop ref-drop" data-target="reference">
@@ -51,13 +51,36 @@
         </div>
       </div>
 
+      <!-- Mode picker -->
+      <div class="field">
+        <span class="label">Mode</span>
+        <div class="modes" role="radiogroup" aria-label="Placement mode">
+          <label class="mode-pill"><input type="radio" name="mode" value="free" checked /><span><strong>Free</strong><small>Model picks placement.<br/>Polygon ignored.</small></span></label>
+          <label class="mode-pill"><input type="radio" name="mode" value="mask" /><span><strong>Mask</strong><small>Polygon → binary mask.<br/>White = place here.</small></span></label>
+          <label class="mode-pill"><input type="radio" name="mode" value="overlay" /><span><strong>Overlay</strong><small>Reference is pre-placed<br/>inside the polygon.</small></span></label>
+        </div>
+      </div>
+
+      <!-- Instruction -->
       <label class="field">
         <span class="label">Instruction</span>
         <textarea id="instruction" rows="3" placeholder="e.g. place this fence along the back edge of the lawn">place this fence along the back edge of the lawn</textarea>
       </label>
 
+      <!-- System prompt (configurable) -->
+      <details class="advanced" id="prompt-details">
+        <summary>
+          System prompt
+          <span class="muted small" id="prompt-mode-tag">(free)</span>
+        </summary>
+        <div class="prompt-row">
+          <button type="button" class="ghost" id="reset-prompt" title="Reset to the default for the current mode">Reset to default</button>
+        </div>
+        <textarea id="system-prompt" rows="6" placeholder="Loading default…"></textarea>
+      </details>
+
       <details class="advanced">
-        <summary>Advanced</summary>
+        <summary>Other</summary>
         <label class="field">
           <span class="label">Segment <small class="muted">(Grounded-SAM, comma-sep labels)</small></span>
           <input id="segment" type="text" placeholder="e.g. ground,trees,sky" />
@@ -86,9 +109,9 @@
         </div>
       </div>
 
-      <div id="mask-row" class="mask-row" hidden>
-        <span class="muted small">Mask sent to model:</span>
-        <img id="mask-preview" alt="rasterized mask" />
+      <div id="aux-row" class="aux-row" hidden>
+        <span class="muted small" id="aux-label">Mask sent to model:</span>
+        <img id="aux-preview" alt="auxiliary image sent to model" />
       </div>
 
       <form id="refine" hidden>

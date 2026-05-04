@@ -4,30 +4,28 @@ Endpoints
 ---------
 ``GET /``
     Drag-drop UI. Lets the user upload a scene + reference, draw a
-    polygon region on the scene, and run the insertion pipeline.
+    polygon, pick a mode, edit the system prompt, and run the pipeline.
 
 ``POST /api/insert``
-    Multipart upload for one composite generation. Optional fields:
-    ``polygon`` (JSON list of normalized [u, v] pairs), ``previous``
-    (bytes of an earlier composite for refinement), ``segment``
-    (Grounded-SAM labels), ``relight`` (IC-Light prompt).
-    Returns a JSON envelope:
-    ``{"composite_url": "...", "mask_url": "..." | null, "text": "..."}``.
-    The actual image bytes are served from short-lived in-memory tokens.
+    Multipart upload for one composite generation. See the field table
+    below. Returns a JSON envelope with one-shot URLs for the bytes:
+    ``{composite_url, aux_url, aux_kind, text}``.
 
 ``GET /api/result/{token}/composite.png``
-``GET /api/result/{token}/mask.png``
-    One-shot fetches for the result bytes referenced by the JSON above.
-    Used so the client can show composite + mask side by side without
-    re-uploading and without inflating the JSON with base64.
+``GET /api/result/{token}/aux.png``
+    One-shot fetches for the bytes referenced from the JSON envelope.
+
+``GET /api/defaults``
+    Default system prompts for the four modes (free / mask / overlay /
+    refine). Used by the UI to pre-fill the system-prompt textarea.
 
 ``GET /healthz``
     Liveness probe.
 
 State
 -----
-The composite cache is a process-local dict keyed by an opaque token.
-Entries evict on process restart; nothing is persisted to disk.
+A small in-memory result cache keyed by random token. Tokens evict on
+process restart and FIFO-evict when the cache is full.
 """
 
 from __future__ import annotations
@@ -44,6 +42,13 @@ from fastapi.staticfiles import StaticFiles
 
 from ..config import load_env
 from ..pipeline import insert_object
+from ..pipeline.insert import (
+    DEFAULT_FREE_PROMPT,
+    DEFAULT_MASK_PROMPT,
+    DEFAULT_OVERLAY_PROMPT,
+    DEFAULT_REFINE_PROMPT,
+    Mode,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -52,24 +57,17 @@ STATIC_DIR = Path(__file__).parent / "static"
 class _CachedResult:
     composite_bytes: bytes
     composite_mime: str
-    mask_bytes: bytes  # empty if no polygon was drawn
+    aux_bytes: bytes  # mask or overlay bytes; empty for free / refine
+    aux_kind: str | None  # "mask" | "overlay" | None
 
 
-# Module-level cache so tokens issued by /api/insert resolve in
-# subsequent /api/result/<token>/* fetches. Capped to keep memory
-# bounded under load — see _cache_put.
 _RESULT_CACHE: dict[str, _CachedResult] = {}
 _CACHE_CAP = 64
 
 
 def _cache_put(result: _CachedResult) -> str:
-    """Store a result and return an opaque token.
-
-    Evicts the oldest entry when the cache is full. Tokens are
-    cryptographically random so they aren't guessable by other clients.
-    """
+    """Stash a result and return an opaque token."""
     if len(_RESULT_CACHE) >= _CACHE_CAP:
-        # Pop oldest (insertion-ordered dict — Python 3.7+).
         _RESULT_CACHE.pop(next(iter(_RESULT_CACHE)))
     token = secrets.token_urlsafe(16)
     _RESULT_CACHE[token] = result
@@ -77,12 +75,10 @@ def _cache_put(result: _CachedResult) -> str:
 
 
 def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
-    """Parse the ``polygon`` form field.
+    """Parse ``polygon`` form field. Empty → None.
 
-    Empty string → None (no polygon drawn). Otherwise expect a JSON
-    list of ``[u, v]`` pairs with values in ``[0, 1]``. Anything else
-    raises ``HTTPException(400)`` so the client gets a helpful message
-    rather than a generic 502.
+    Raises 400 with a clear message on bad payloads so the UI can
+    surface them inline.
     """
     raw = raw.strip()
     if not raw:
@@ -99,9 +95,7 @@ def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
     points: list[tuple[float, float]] = []
     for p in parsed:
         if not (isinstance(p, (list, tuple)) and len(p) == 2):
-            raise HTTPException(
-                status_code=400, detail=f"Bad polygon vertex: {p!r}"
-            )
+            raise HTTPException(status_code=400, detail=f"Bad polygon vertex: {p!r}")
         u, v = float(p[0]), float(p[1])
         if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
             raise HTTPException(
@@ -112,17 +106,13 @@ def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
     return points
 
 
-def create_app() -> FastAPI:
-    """Build and return the FastAPI app.
+VALID_MODES: set[str] = {"free", "mask", "overlay"}
 
-    Loads ``.env`` once at startup so providers can find their keys
-    when constructed lazily inside :func:`insert_object`.
-    """
+
+def create_app() -> FastAPI:
+    """Build and return the FastAPI app."""
     load_env()
     app = FastAPI(title="image-ai-edit", version="0.1.0")
-
-    # Serve /static/* from the same directory as index.html. Zero-build
-    # frontend; no bundler.
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/healthz")
@@ -133,34 +123,62 @@ def create_app() -> FastAPI:
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/api/defaults")
+    async def defaults() -> dict[str, str]:
+        """Default system prompts for each mode + refinement.
+
+        The UI fetches this once at load time to pre-fill the
+        system-prompt textarea and to "Reset to default" on demand.
+        """
+        return {
+            "free": DEFAULT_FREE_PROMPT,
+            "mask": DEFAULT_MASK_PROMPT,
+            "overlay": DEFAULT_OVERLAY_PROMPT,
+            "refine": DEFAULT_REFINE_PROMPT,
+        }
+
     @app.post("/api/insert")
     async def insert(
         request: Request,
         scene: UploadFile = File(...),
         reference: UploadFile = File(...),
         instruction: str = Form(...),
+        mode: str = Form("free"),
         polygon: str = Form(""),
+        system_prompt: str = Form(""),
         segment: str = Form(""),
         relight: str = Form(""),
         previous: UploadFile | None = File(None),
     ) -> dict[str, str | None]:
-        """Run the insertion pipeline on uploaded images.
+        """Run the insertion pipeline.
+
+        Required: ``scene``, ``reference``, ``instruction``.
+        Mode: ``free`` (default), ``mask``, ``overlay``. ``mask`` and
+        ``overlay`` require a polygon.
 
         Returns a JSON envelope with one-shot URLs for the composite
-        and (if a polygon was provided) the rasterized mask. The bytes
-        live in a short-lived in-memory cache keyed by random token.
+        and (when relevant) the auxiliary image actually sent to the
+        model.
         """
+        if mode not in VALID_MODES:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown mode: {mode!r}. Try {sorted(VALID_MODES)}."
+            )
+        polygon_pts = _parse_polygon(polygon)
+        if mode in ("mask", "overlay") and not polygon_pts:
+            raise HTTPException(
+                status_code=400, detail=f"mode={mode!r} requires a polygon (≥3 vertices)."
+            )
+
         scene_bytes = await scene.read()
         reference_bytes = await reference.read()
         previous_bytes = await previous.read() if previous is not None else None
         previous_mime = (previous.content_type or "image/png") if previous else "image/png"
 
-        polygon_pts = _parse_polygon(polygon)
         seg_prompts = [s.strip() for s in segment.split(",") if s.strip()]
         relight_prompt = relight.strip() or None
+        custom_system_prompt = system_prompt.strip() or None
 
-        # Persist uploads to a temp dir only because insert_object takes
-        # paths today. Cleared as soon as the response is built.
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             scene_path = tmp_path / (scene.filename or "scene.bin")
@@ -173,7 +191,9 @@ def create_app() -> FastAPI:
                     scene_path,
                     reference_path,
                     instruction,
+                    mode=mode,  # type: ignore[arg-type]
                     mask_polygon=polygon_pts,
+                    system_prompt=custom_system_prompt,
                     previous_composite=previous_bytes,
                     previous_mime=previous_mime,
                     segmentation_prompts=seg_prompts or None,
@@ -181,6 +201,8 @@ def create_app() -> FastAPI:
                 )
             except HTTPException:
                 raise
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -188,13 +210,15 @@ def create_app() -> FastAPI:
             _CachedResult(
                 composite_bytes=result.composite_bytes,
                 composite_mime=result.composite_mime,
-                mask_bytes=result.mask_bytes,
+                aux_bytes=result.aux_bytes,
+                aux_kind=result.aux_kind,
             )
         )
         base = str(request.base_url).rstrip("/")
         return {
             "composite_url": f"{base}/api/result/{token}/composite.png",
-            "mask_url": f"{base}/api/result/{token}/mask.png" if result.mask_bytes else None,
+            "aux_url": f"{base}/api/result/{token}/aux.png" if result.aux_bytes else None,
+            "aux_kind": result.aux_kind,
             "text": result.text or "",
         }
 
@@ -205,14 +229,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Result expired or not found.")
         return Response(content=cached.composite_bytes, media_type=cached.composite_mime)
 
-    @app.get("/api/result/{token}/mask.png")
-    async def fetch_mask(token: str) -> Response:
+    @app.get("/api/result/{token}/aux.png")
+    async def fetch_aux(token: str) -> Response:
         cached = _RESULT_CACHE.get(token)
         if not cached:
             raise HTTPException(status_code=404, detail="Result expired or not found.")
-        if not cached.mask_bytes:
-            raise HTTPException(status_code=404, detail="No mask was generated for this result.")
-        return Response(content=cached.mask_bytes, media_type="image/png")
+        if not cached.aux_bytes:
+            raise HTTPException(status_code=404, detail="No aux image for this result.")
+        return Response(content=cached.aux_bytes, media_type="image/png")
 
     return app
 

@@ -172,8 +172,42 @@ textarea { resize: vertical; min-height: 4.5rem; font-family: inherit; }
 .advanced summary {
   cursor: pointer; font-size: 0.85rem; color: var(--muted);
   padding: 0.25rem 0; user-select: none;
+  display: flex; align-items: center; gap: 0.4rem;
 }
 .advanced summary:hover { color: var(--text); }
+.advanced[open] { padding-bottom: 0.5rem; }
+.prompt-row { display: flex; justify-content: flex-end; margin: 0.4rem 0 0.4rem; }
+
+/* ---- Mode picker ---- */
+.modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+}
+.mode-pill {
+  position: relative;
+  cursor: pointer;
+}
+.mode-pill input { position: absolute; opacity: 0; pointer-events: none; }
+.mode-pill > span {
+  display: flex; flex-direction: column; gap: 0.15rem;
+  padding: 0.55rem 0.6rem;
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+.mode-pill > span strong { font-size: 0.85rem; }
+.mode-pill > span small { color: var(--muted); font-size: 0.7rem; line-height: 1.25; }
+.mode-pill:hover > span { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.mode-pill input:checked + span {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+.mode-pill input:focus-visible + span {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
 
 /* ---- Buttons ---- */
 button {
@@ -253,11 +287,11 @@ button.ghost:hover { color: var(--text); border-color: var(--text); background: 
 .canvas .empty-state svg { width: 36px; height: 36px; opacity: 0.4; }
 .canvas .empty-state p { margin: 0; max-width: 360px; }
 
-.mask-row {
+.aux-row {
   display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1rem;
 }
-.mask-row img {
-  width: 96px; height: 60px; object-fit: contain;
+.aux-row img {
+  width: 120px; height: 75px; object-fit: contain;
   background: black;
   border: 1px solid var(--border);
   border-radius: 4px;
