@@ -46,6 +46,7 @@ DEFAULT_INPAINT_MODEL = "fal-ai/flux-kontext-lora/inpaint"
 # endpoint works through the same SDK path.
 DEFAULT_GPTIMAGE_MODEL = "fal-ai/gpt-image-1/edit-image"
 DEFAULT_NANO_BANANA_MODEL = "fal-ai/nano-banana-pro/edit"
+DEFAULT_FLUX_REF_INPAINT_MODEL = "fal-ai/flux-general/inpainting"
 POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 600.0
 
@@ -360,6 +361,79 @@ class FalAIGPTImage:
         )
 
 
+class FalAIFluxRefInpaint:
+    """fal-ai/flux-general/inpainting with native reference conditioning.
+
+    The single hosted endpoint that takes ALL FOUR inputs natively:
+      - ``image_url``           : the scene
+      - ``mask_url``            : binary polygon mask
+      - ``reference_image_url`` : the object reference
+      - ``prompt``              : text instruction
+
+    Plus ``reference_strength`` (default 0.65) which controls how
+    strongly the reference image conditions the inpainted region.
+    Empirically (May 2026 sweep saved at docs/results/23-*) this
+    endpoint produced 0.0% strong outside-mask drift on the
+    yard+fence variant-B test — better than every other engine — and
+    delivered visible reference-conditioned fence rendering inside the
+    polygon with steps=50, guidance_scale=5.0.
+
+    The mask is treated as a hard alpha constraint at the provider
+    level (FLUX inpainting semantics), so we never have to fight the
+    semantic-prior trap that gpt-image-1 / Nano Banana suffer from.
+    """
+
+    def __init__(self, provider: FalAI) -> None:
+        self._provider = provider
+
+    async def edit(
+        self,
+        scene: tuple[bytes, str],
+        mask: tuple[bytes, str],
+        reference: tuple[bytes, str],
+        prompt: str,
+        *,
+        model: str | None = None,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 5.0,
+        reference_strength: float = 0.65,
+        **kwargs: Any,
+    ) -> EditResponse:
+        """Run mask-bound, reference-conditioned inpainting via fal."""
+        import fal_client
+        import os
+
+        os.environ.setdefault("FAL_KEY", self._provider.api_key)
+
+        sb, sm = scene
+        mb, mm = mask
+        rb, rm = reference
+
+        arguments: dict[str, Any] = {
+            "prompt": prompt,
+            "image_url": _data_uri(sb, sm),
+            "mask_url": _data_uri(mb, mm),
+            "reference_image_url": _data_uri(rb, rm),
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "reference_strength": reference_strength,
+        }
+        arguments.update(kwargs)
+
+        result = await asyncio.to_thread(
+            fal_client.subscribe,
+            model or DEFAULT_FLUX_REF_INPAINT_MODEL,
+            arguments=arguments,
+            with_logs=False,
+        )
+        url = _first_image_url(result)
+        return EditResponse(
+            image_bytes=await _download(url),
+            mime_type="image/png",
+            raw=result,
+        )
+
+
 class FalAINanoBanana:
     """Nano Banana family on fal.ai (Google's Gemini-3 image-edit models).
 
@@ -431,6 +505,7 @@ class FalAI(BaseProvider):
         self.inpaint = FalAIInpaintRef(self)
         self.gpt_image = FalAIGPTImage(self)
         self.nano_banana = FalAINanoBanana(self)
+        self.flux_ref_inpaint = FalAIFluxRefInpaint(self)
 
     @property
     def name(self) -> str:

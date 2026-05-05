@@ -74,12 +74,13 @@ from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
 MaskEngine = Literal[
-    "gemini_crop",     # default — crop polygon bbox+pad → Nano Banana edit → feathered reassemble
-    "anydoor_chain",   # AnyDoor placement + gpt-image-1 refinement
-    "gpt_fal",         # gpt-image-1 alone (ignores polygon outside semantic prior)
-    "anydoor",         # AnyDoor alone
-    "openai",          # OpenAI direct
-    "flux_prepaste",   # FLUX prepaste fallback
+    "flux_ref_inpaint",  # default — fal flux-general/inpainting with native reference_image_url
+    "gemini_crop",       # crop polygon bbox+pad → Nano Banana edit → feathered reassemble
+    "anydoor_chain",     # AnyDoor placement + gpt-image-1 refinement
+    "gpt_fal",           # gpt-image-1 alone (ignores polygon outside semantic prior)
+    "anydoor",           # AnyDoor alone
+    "openai",            # OpenAI direct
+    "flux_prepaste",     # FLUX prepaste fallback
 ]
 AuxKind = Literal["mask", "previous"]
 
@@ -464,7 +465,10 @@ async def insert_object(
     inpaint_steps: int = 40,
     inpaint_strength: float = 0.45,
     reference_crop: tuple[float, float] | None = None,
-    mask_engine: MaskEngine = "gemini_crop",
+    mask_engine: MaskEngine = "flux_ref_inpaint",
+    flux_ref_strength: float = 0.65,
+    flux_ref_steps: int = 50,
+    flux_ref_guidance: float = 5.0,
     gemini_crop_pad_frac: float = 0.30,
     gemini_crop_model: str | None = None,
     openai_quality: str = "high",
@@ -586,7 +590,41 @@ async def insert_object(
             clipped.save(buf, format="PNG")
             return buf.getvalue()
 
-        if mask_engine == "gemini_crop":
+        if mask_engine == "flux_ref_inpaint":
+            # The single hosted endpoint that takes scene + mask +
+            # reference + prompt as four native input fields. FLUX
+            # treats the mask as a hard alpha constraint at the
+            # provider level (no semantic-prior trap), and
+            # reference_image_url conditions the inpainted region
+            # toward the reference object's appearance. Empirically
+            # the cleanest mask compliance of any engine in the
+            # codebase (~0% strong outside-mask drift on variant-B).
+            #
+            # FLUX inpainting wants SHORT focused prompts — the long
+            # PRESERVATION-CRITICAL template that gpt-image-1 needs
+            # actively hurts FLUX's rendering. We pass just the
+            # user's instruction here, with a minimal photorealistic
+            # suffix. The reference_image_url does the heavy lifting
+            # for identity, not the prompt.
+            fal = falai or FalAI()
+            flux_prompt = (
+                f"{instruction}, photorealistic, matching the scene's "
+                "perspective and lighting"
+            )
+            edit_resp = await fal.flux_ref_inpaint.edit(
+                scene=(scene_bytes, scene_mime),
+                mask=(aux_bytes, "image/png"),
+                reference=(reference_bytes, reference_mime),
+                prompt=flux_prompt,
+                reference_strength=flux_ref_strength,
+                num_inference_steps=flux_ref_steps,
+                guidance_scale=flux_ref_guidance,
+            )
+            raw_bytes = _maybe_post_clip(edit_resp.image_bytes)
+            raw_mime = "image/png"
+            edit_text = ""
+
+        elif mask_engine == "gemini_crop":
             # Crop+edit+reassemble. Bypasses the semantic-prior trap:
             # the model only sees a region around the polygon, not
             # other places in the scene where the object class
