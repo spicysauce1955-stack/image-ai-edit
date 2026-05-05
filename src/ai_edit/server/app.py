@@ -141,6 +141,7 @@ def create_app() -> FastAPI:
         system_prompt: str = Form(""),
         segment: str = Form(""),
         relight: str = Form(""),
+        reference_crop: str = Form(""),
         previous: UploadFile | None = File(None),
     ) -> dict[str, str | None]:
         """Run the insertion pipeline.
@@ -173,6 +174,22 @@ def create_app() -> FastAPI:
         relight_prompt = relight.strip() or None
         custom_system_prompt = system_prompt.strip() or None
 
+        ref_crop: tuple[float, float] | None = None
+        if reference_crop.strip():
+            try:
+                parts = [float(x) for x in reference_crop.split(",")]
+                if len(parts) != 2 or not (0 <= parts[0] < parts[1] <= 1):
+                    raise ValueError
+                ref_crop = (parts[0], parts[1])
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "reference_crop must be 'top,bottom' with "
+                        "0 <= top < bottom <= 1, e.g. '0.30,0.85'."
+                    ),
+                )
+
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             scene_path = tmp_path / (scene.filename or "scene.bin")
@@ -188,6 +205,7 @@ def create_app() -> FastAPI:
                     mode=mode,  # type: ignore[arg-type]
                     mask_polygon=polygon_pts,
                     system_prompt=custom_system_prompt,
+                    reference_crop=ref_crop,
                     previous_composite=previous_bytes,
                     previous_mime=previous_mime,
                     segmentation_prompts=seg_prompts or None,

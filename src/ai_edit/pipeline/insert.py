@@ -93,28 +93,33 @@ DEFAULT_FREE_PROMPT = (
     "the object. Output only the final composited image."
 )
 
-# Mask mode goes to FLUX-Kontext-LoRA, not Gemini. The mask is a hard
-# alpha constraint at the provider level, so the prompt is purely
-# about object identity and integration. Empirically, the most
-# effective phrasing tells FLUX to *preserve specific structural
-# details* of the reference — slats/posts/texture by name — rather
-# than just "use the reference". Without this kind of language the
-# model produces a flat featureless inpaint of roughly the right
-# colour. The "exactly as shown in the reference image" phrase is the
-# key unlock; combined with guidance_scale=4.5 it carries the
-# reference's structure into the output.
+# Mask mode is a TWO-STEP pipeline:
+#
+#   1. Pre-paste the reference object into the polygon shape on a copy
+#      of the scene. This gives the diffusion model exact reference
+#      pixels to harmonize rather than hallucinate from soft cues.
+#   2. Run FLUX-Kontext-LoRA Inpaint on the prepasted image at LOW
+#      strength (~0.45). Strength controls how much the model is
+#      allowed to deviate from the input; low strength preserves most
+#      of the pasted reference while smoothing seams, fixing
+#      perspective, and adding shadows.
+#
+# Empirical comparison (yard.png + fence.jpg, see docs/results/):
+#   - Direct FLUX inpaint w/ reference: visible slats but flat
+#   - Pre-paste + low-strength refine:  exact slats + posts + texture
+#
+# So the prompt for mask mode is intentionally a *harmonize* prompt,
+# not an *insert from scratch* prompt — the reference is already in
+# the right place; the model's job is to integrate it cleanly.
 DEFAULT_MASK_PROMPT = (
-    "Insert the object photorealistically inside the masked region. "
-    "Reproduce the object exactly as shown in the reference image — "
-    "preserve every structural detail (slats, posts, panels, seams, "
-    "ribs, edges, bolts, joints, whatever the reference shows), "
-    "preserve the exact colour and material, and preserve the surface "
-    "texture and finish. Do not flatten, smooth, or generalize the "
-    "object. Match the scene's perspective and the existing ground "
-    "plane. Match the scene's lighting: infer the sun direction from "
-    "the existing shadows in the scene and shade the object "
-    "accordingly, casting a soft realistic ground shadow consistent "
-    "with that direction."
+    "Harmonize and sharpen the object that has already been placed in "
+    "the masked region. Preserve every structural detail of the object "
+    "(slats, posts, panels, seams, ribs, edges, bolts, joints — "
+    "whatever the reference shows) exactly as visible. Preserve the "
+    "exact colour, material, and surface texture. Smooth seams between "
+    "the inserted object and the surrounding scene, match the scene's "
+    "perspective, and add a soft realistic ground shadow consistent "
+    "with the existing lighting. Do not redesign or flatten the object."
 )
 
 DEFAULT_REFINE_PROMPT = (
@@ -203,6 +208,82 @@ def _rasterize_polygon(
     return buf.getvalue()
 
 
+def _build_prepaste(
+    scene_bytes: bytes,
+    reference_bytes: bytes,
+    polygon_norm: list[tuple[float, float]],
+    *,
+    reference_crop: tuple[float, float] | None = None,
+) -> tuple[bytes, bytes]:
+    """Pre-paste the reference into the polygon and return ``(prepasted, ref_for_paste)``.
+
+    This is the heart of the high-fidelity insertion strategy. Empirically
+    a single direct call to FLUX-Kontext-LoRA Inpaint produces a flat,
+    "generalized" version of the reference object — slats and posts
+    smoothed into a featureless panel — because diffusion inpainting
+    hallucinates the masked region from scratch using the reference
+    only as soft guidance.
+
+    Pre-pasting the reference into the polygon BEFORE running the
+    diffusion pass gives the model exact reference pixels to harmonize
+    rather than hallucinate, and the subsequent low-strength
+    (``strength=0.45``) inpaint preserves most of those pixels while
+    smoothing the polygon edges, fixing perspective, and adding
+    shadows.
+
+    ``reference_crop`` (top, bottom) — both in ``[0, 1]`` — narrows the
+    reference vertically before pasting. Useful when the reference
+    photo has sky/grass/background above and below the object that
+    would otherwise pollute the paste. ``None`` uses the whole
+    reference.
+    """
+    with Image.open(io.BytesIO(scene_bytes)) as raw_scene:
+        scene = raw_scene.convert("RGB")
+    with Image.open(io.BytesIO(reference_bytes)) as raw_ref:
+        ref = raw_ref.convert("RGB")
+
+    W, H = scene.size
+    pixel_pts = _polygon_to_pixels(polygon_norm, W, H)
+
+    # Polygon bounding box in scene-pixel coords.
+    xs = [p[0] for p in pixel_pts]
+    ys = [p[1] for p in pixel_pts]
+    bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
+    bw, bh = max(1, bx1 - bx0), max(1, by1 - by0)
+
+    # Optional vertical crop of the reference to isolate the object from
+    # its own photo's background.
+    if reference_crop:
+        top, bot = reference_crop
+        rH = ref.height
+        ref = ref.crop((0, int(top * rH), ref.width, int(bot * rH)))
+
+    rW, rH = ref.size
+    # Cover-fit (preserve aspect ratio, crop excess) so the pasted
+    # reference fully fills the bounding box without letterboxing.
+    scale = max(bw / rW, bh / rH)
+    new_w = max(1, round(rW * scale))
+    new_h = max(1, round(rH * scale))
+    ref_resized = ref.resize((new_w, new_h), Image.LANCZOS)
+    cx = (new_w - bw) // 2
+    cy = (new_h - bh) // 2
+    ref_for_paste = ref_resized.crop((cx, cy, cx + bw, cy + bh))
+
+    # Paste at the bbox position, then clip to the exact polygon shape
+    # via the binary mask so areas outside the polygon stay scene-pure.
+    overlay = scene.copy()
+    overlay.paste(ref_for_paste, (bx0, by0))
+    poly_mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(poly_mask).polygon(pixel_pts, fill=255)
+    prepasted = Image.composite(overlay, scene, poly_mask)
+
+    pp_buf = io.BytesIO()
+    prepasted.save(pp_buf, format="PNG")
+    rf_buf = io.BytesIO()
+    ref_for_paste.save(rf_buf, format="JPEG", quality=95)
+    return pp_buf.getvalue(), rf_buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -222,9 +303,10 @@ async def insert_object(
     replicate: Replicate | None = None,
     gemini: Gemini | None = None,
     falai: FalAI | None = None,
-    inpaint_guidance_scale: float = 4.5,
+    inpaint_guidance_scale: float = 3.5,
     inpaint_steps: int = 40,
-    inpaint_strength: float = 0.92,
+    inpaint_strength: float = 0.45,
+    reference_crop: tuple[float, float] | None = None,
 ) -> InsertResult:
     """Run the insertion pipeline end-to-end.
 
@@ -254,9 +336,16 @@ async def insert_object(
         Provider DI hooks.
     inpaint_guidance_scale, inpaint_steps, inpaint_strength:
         Forwarded to FLUX-Kontext-LoRA when in mask mode. Defaults
-        (g=4.5, steps=40, s=0.92) were tuned empirically — see
-        ``docs/results/`` for the comparison sweep. Turn guidance up
-        further for stricter prompt adherence at the cost of variety.
+        (g=3.5, steps=40, s=0.45) were tuned empirically for the
+        pre-paste + low-strength refine flow — see ``docs/results/``
+        for the sweep. Strength controls how much the model deviates
+        from the prepasted scene; low values preserve more of the
+        reference's exact pixels.
+    reference_crop:
+        Optional ``(top, bottom)`` fractions in ``[0, 1]`` that
+        vertically narrow the reference image before pasting. Useful
+        when the reference photo has sky/grass/background above and
+        below the object. ``None`` uses the whole reference.
     """
     scene_path = Path(scene_path)
     reference_path = Path(reference_path)
@@ -303,16 +392,23 @@ async def insert_object(
         aux_bytes = mask_bytes
         aux_kind = "mask"
 
-        # FLUX gets a focused prompt — the system_prompt acts as
-        # supplemental guidance, the user's instruction is the lead.
+        # Pre-paste the reference into the polygon shape so FLUX has
+        # exact reference pixels to harmonize rather than hallucinate.
+        prepasted_bytes, ref_for_paste_bytes = _build_prepaste(
+            scene_bytes,
+            reference_bytes,
+            mask_polygon,
+            reference_crop=reference_crop,
+        )
+
         template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
         flux_prompt = f"{instruction}. {template}"
 
         fal = falai or FalAI()
         edit_resp = await fal.inpaint.inpaint(
-            scene=(scene_bytes, scene_mime),
+            scene=(prepasted_bytes, "image/png"),  # the prepasted scene
             mask=(mask_bytes, "image/png"),
-            reference=(reference_bytes, reference_mime),
+            reference=(ref_for_paste_bytes, "image/jpeg"),
             prompt=flux_prompt,
             guidance_scale=inpaint_guidance_scale,
             num_inference_steps=inpaint_steps,
