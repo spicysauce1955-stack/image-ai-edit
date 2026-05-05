@@ -105,6 +105,7 @@ def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
 
 
 VALID_MODES: set[str] = {"free", "mask"}
+VALID_MASK_ENGINES: set[str] = {"openai", "flux_prepaste"}
 
 
 def create_app() -> FastAPI:
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
         segment: str = Form(""),
         relight: str = Form(""),
         reference_crop: str = Form(""),
+        mask_engine: str = Form("openai"),
         previous: UploadFile | None = File(None),
     ) -> dict[str, str | None]:
         """Run the insertion pipeline.
@@ -163,6 +165,11 @@ def create_app() -> FastAPI:
         if mode == "mask" and not polygon_pts:
             raise HTTPException(
                 status_code=400, detail="mode='mask' requires a polygon (≥3 vertices)."
+            )
+        if mask_engine not in VALID_MASK_ENGINES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown mask_engine: {mask_engine!r}. Try {sorted(VALID_MASK_ENGINES)}.",
             )
 
         scene_bytes = await scene.read()
@@ -206,6 +213,7 @@ def create_app() -> FastAPI:
                     mask_polygon=polygon_pts,
                     system_prompt=custom_system_prompt,
                     reference_crop=ref_crop,
+                    mask_engine=mask_engine,  # type: ignore[arg-type]
                     previous_composite=previous_bytes,
                     previous_mime=previous_mime,
                     segmentation_prompts=seg_prompts or None,

@@ -18,9 +18,14 @@ def load_env(path: str | Path | None = None) -> None:
 
     Defaults to the ``.env`` next to the current working directory,
     which matches how the CLI is invoked from the repo root.
+
+    ``override=True`` because the project's ``.env`` is the source of
+    truth — without override, a stale shell export (e.g. an
+    ``OPENAI_API_KEY`` left over from another tool) silently wins
+    and you get auth errors that are very hard to debug.
     """
     p = Path(path) if path else Path.cwd() / ".env"
-    load_dotenv(p)
+    load_dotenv(p, override=True)
 
 
 def get_env(key: str, *, required: bool = True) -> str | None:

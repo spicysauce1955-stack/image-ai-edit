@@ -152,7 +152,7 @@ main {
 /* ---- Fields ---- */
 .field { display: grid; gap: 0.35rem; margin-bottom: 0.85rem; }
 .field .label small { font-weight: 400; }
-input[type=text], textarea {
+input[type=text], textarea, select {
   font: inherit;
   padding: 0.55rem 0.7rem;
   border: 1px solid var(--border);
@@ -161,7 +161,7 @@ input[type=text], textarea {
   color: var(--text);
   width: 100%;
 }
-input[type=text]:focus, textarea:focus {
+input[type=text]:focus, textarea:focus, select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);

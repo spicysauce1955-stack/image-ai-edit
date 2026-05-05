@@ -81,7 +81,14 @@
       <details class="advanced">
         <summary>Other</summary>
         <label class="field">
-          <span class="label">Reference crop <small class="muted">(mask mode only — vertical band of the reference, e.g. <code>0.30,0.85</code>)</small></span>
+          <span class="label">Mask engine <small class="muted">(mask mode only)</small></span>
+          <select id="mask-engine">
+            <option value="openai" selected>OpenAI gpt-image-1 (default — re-renders reference in scene)</option>
+            <option value="flux_prepaste">FLUX prepaste fallback (lower fidelity, no OpenAI billing required)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="label">Reference crop <small class="muted">(FLUX fallback only — vertical band of the reference, e.g. <code>0.30,0.85</code>)</small></span>
           <input id="reference-crop" type="text" placeholder="e.g. 0.30,0.85" />
         </label>
         <label class="field">

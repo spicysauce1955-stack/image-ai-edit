@@ -10,7 +10,8 @@ new provider.
 from .falai import FalAI
 from .gemini import Gemini
 from .minimax import MiniMax
+from .openai import OpenAI
 from .replicate import Replicate
 from .zhipuai import ZhipuAI
 
-__all__ = ["FalAI", "Gemini", "MiniMax", "Replicate", "ZhipuAI"]
+__all__ = ["FalAI", "Gemini", "MiniMax", "OpenAI", "Replicate", "ZhipuAI"]

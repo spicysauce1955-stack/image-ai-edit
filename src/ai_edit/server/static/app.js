@@ -33,6 +33,7 @@ const instructionEl  = $('#instruction');
 const segmentEl      = $('#segment');
 const relightEl      = $('#relight');
 const refCropEl      = $('#reference-crop');
+const maskEngineEl   = $('#mask-engine');
 const generateBtn    = $('#generate');
 const generateLabel  = $('.label', generateBtn);
 const spinner        = $('.spinner', generateBtn);
@@ -316,6 +317,7 @@ generateBtn.addEventListener('click', () => {
   if (segmentEl.value.trim()) fd.append('segment', segmentEl.value);
   if (relightEl.value.trim()) fd.append('relight', relightEl.value);
   if (refCropEl.value.trim()) fd.append('reference_crop', refCropEl.value);
+  if (maskEngineEl?.value) fd.append('mask_engine', maskEngineEl.value);
   callPipeline(fd, 'initial');
 });
 

@@ -70,9 +70,10 @@ from typing import Literal
 from PIL import Image, ImageDraw
 
 from ..models.base import SegmentationMask
-from ..providers import FalAI, Gemini, Replicate
+from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
+MaskEngine = Literal["openai", "flux_prepaste"]
 AuxKind = Literal["mask", "previous"]
 
 
@@ -112,14 +113,14 @@ DEFAULT_FREE_PROMPT = (
 # not an *insert from scratch* prompt — the reference is already in
 # the right place; the model's job is to integrate it cleanly.
 DEFAULT_MASK_PROMPT = (
-    "Harmonize and sharpen the object that has already been placed in "
-    "the masked region. Preserve every structural detail of the object "
-    "(slats, posts, panels, seams, ribs, edges, bolts, joints — "
-    "whatever the reference shows) exactly as visible. Preserve the "
-    "exact colour, material, and surface texture. Smooth seams between "
-    "the inserted object and the surrounding scene, match the scene's "
-    "perspective, and add a soft realistic ground shadow consistent "
-    "with the existing lighting. Do not redesign or flatten the object."
+    "Use the reference image to insert the object into the masked region. "
+    "Reproduce the object's design, materials, colour, and surface "
+    "details (slats, posts, panels, seams, ribs, edges, bolts, joints — "
+    "whatever the reference shows) exactly. Re-render the object in the "
+    "scene's perspective so it sits naturally in the masked area at the "
+    "correct angle and scale. Match the scene's lighting, add a soft "
+    "realistic ground shadow, and keep occlusion of foreground objects "
+    "intact. Do not change anything outside the masked region."
 )
 
 DEFAULT_REFINE_PROMPT = (
@@ -205,6 +206,38 @@ def _rasterize_polygon(
 
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _build_openai_mask(
+    scene_bytes: bytes,
+    polygon_norm: list[tuple[float, float]],
+) -> bytes:
+    """Rasterize the polygon as the alpha-channel mask gpt-image-1 expects.
+
+    OpenAI's image-edit API uses a different mask convention than most
+    diffusion APIs:
+
+    - Mask pixels with alpha = 0 (transparent) are inpainted.
+    - Mask pixels with alpha = 255 (opaque) are preserved.
+
+    So we build an RGBA image whose alpha channel is 0 inside the
+    polygon and 255 outside. The RGB channels don't matter to the
+    API; we use 0,0,0 for cleanliness.
+    """
+    if len(polygon_norm) < 3:
+        raise ValueError(f"Polygon needs at least 3 vertices, got {len(polygon_norm)}.")
+
+    with Image.open(io.BytesIO(scene_bytes)) as scene:
+        w, h = scene.size
+
+    alpha = Image.new("L", (w, h), 255)
+    ImageDraw.Draw(alpha).polygon(_polygon_to_pixels(polygon_norm, w, h), fill=0)
+    rgba = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    rgba.putalpha(alpha)
+
+    buf = io.BytesIO()
+    rgba.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -307,6 +340,9 @@ async def insert_object(
     inpaint_steps: int = 40,
     inpaint_strength: float = 0.45,
     reference_crop: tuple[float, float] | None = None,
+    mask_engine: MaskEngine = "openai",
+    openai_quality: str = "high",
+    openai: OpenAI | None = None,
 ) -> InsertResult:
     """Run the insertion pipeline end-to-end.
 
@@ -388,35 +424,63 @@ async def insert_object(
     elif mode == "mask":
         if not mask_polygon:
             raise ValueError("mask mode requires mask_polygon.")
-        mask_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
-        aux_bytes = mask_bytes
+        # Visual mask saved on the result for the UI's preview pane —
+        # always white-on-black regardless of which engine runs, so
+        # users see a familiar shape.
+        aux_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
         aux_kind = "mask"
 
-        # Pre-paste the reference into the polygon shape so FLUX has
-        # exact reference pixels to harmonize rather than hallucinate.
-        prepasted_bytes, ref_for_paste_bytes = _build_prepaste(
-            scene_bytes,
-            reference_bytes,
-            mask_polygon,
-            reference_crop=reference_crop,
-        )
-
         template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
-        flux_prompt = f"{instruction}. {template}"
 
-        fal = falai or FalAI()
-        edit_resp = await fal.inpaint.inpaint(
-            scene=(prepasted_bytes, "image/png"),  # the prepasted scene
-            mask=(mask_bytes, "image/png"),
-            reference=(ref_for_paste_bytes, "image/jpeg"),
-            prompt=flux_prompt,
-            guidance_scale=inpaint_guidance_scale,
-            num_inference_steps=inpaint_steps,
-            strength=inpaint_strength,
-        )
-        raw_bytes = edit_resp.image_bytes
-        raw_mime = edit_resp.mime_type
-        edit_text = ""
+        if mask_engine == "openai":
+            # Native gpt-image-1 path. The model takes the scene as
+            # the canvas, the reference as a separate image[] entry,
+            # and an alpha-channel mask with TRANSPARENT inside the
+            # polygon (= the inpaint region). gpt-image-1 re-renders
+            # the reference object inside the masked region in the
+            # scene's perspective rather than pixel-pasting it.
+            oai_mask = _build_openai_mask(scene_bytes, mask_polygon)
+            oai = openai or OpenAI()
+            oai_resp = await oai.image_edit.edit(
+                scene=(scene_bytes, scene_mime),
+                mask=(oai_mask, "image/png"),
+                references=[(reference_bytes, reference_mime)],
+                prompt=f"{instruction}. {template}",
+                size="auto",
+                quality=openai_quality,
+            )
+            raw_bytes = oai_resp.image_bytes
+            raw_mime = oai_resp.mime_type
+            edit_text = ""
+
+        elif mask_engine == "flux_prepaste":
+            # Fallback for when OpenAI billing is exhausted. Pre-pastes
+            # the reference into the polygon and runs FLUX-Kontext-LoRA
+            # at low strength to harmonize. Lower fidelity than the
+            # OpenAI path but always available on fal.ai.
+            mask_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
+            prepasted_bytes, ref_for_paste_bytes = _build_prepaste(
+                scene_bytes,
+                reference_bytes,
+                mask_polygon,
+                reference_crop=reference_crop,
+            )
+            fal = falai or FalAI()
+            edit_resp = await fal.inpaint.inpaint(
+                scene=(prepasted_bytes, "image/png"),
+                mask=(mask_bytes, "image/png"),
+                reference=(ref_for_paste_bytes, "image/jpeg"),
+                prompt=f"{instruction}. {template}",
+                guidance_scale=inpaint_guidance_scale,
+                num_inference_steps=inpaint_steps,
+                strength=inpaint_strength,
+            )
+            raw_bytes = edit_resp.image_bytes
+            raw_mime = edit_resp.mime_type
+            edit_text = ""
+
+        else:
+            raise ValueError(f"Unknown mask_engine: {mask_engine!r}")
 
     else:  # mode == "free"
         template = system_prompt.strip() if system_prompt else default_system_prompt("free")
