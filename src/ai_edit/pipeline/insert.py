@@ -73,7 +73,7 @@ from ..models.base import SegmentationMask
 from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
-MaskEngine = Literal["openai", "flux_prepaste"]
+MaskEngine = Literal["gpt_fal", "openai", "flux_prepaste"]
 AuxKind = Literal["mask", "previous"]
 
 
@@ -340,7 +340,7 @@ async def insert_object(
     inpaint_steps: int = 40,
     inpaint_strength: float = 0.45,
     reference_crop: tuple[float, float] | None = None,
-    mask_engine: MaskEngine = "openai",
+    mask_engine: MaskEngine = "gpt_fal",
     openai_quality: str = "high",
     openai: OpenAI | None = None,
 ) -> InsertResult:
@@ -432,13 +432,50 @@ async def insert_object(
 
         template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
 
-        if mask_engine == "openai":
-            # Native gpt-image-1 path. The model takes the scene as
-            # the canvas, the reference as a separate image[] entry,
-            # and an alpha-channel mask with TRANSPARENT inside the
-            # polygon (= the inpaint region). gpt-image-1 re-renders
-            # the reference object inside the masked region in the
-            # scene's perspective rather than pixel-pasting it.
+        # Post-clip helper: every mask-mode engine ends with a strict
+        # PIL composite onto the original scene using our binary
+        # polygon mask, so the polygon boundary is enforced
+        # deterministically regardless of any soft-mask behaviour
+        # the upstream model exhibits.
+        def _post_clip(model_output: bytes) -> bytes:
+            with Image.open(io.BytesIO(model_output)) as raw:
+                edited = raw.convert("RGB")
+            with Image.open(io.BytesIO(scene_bytes)) as raw_scene:
+                scene_img = raw_scene.convert("RGB")
+            if edited.size != scene_img.size:
+                edited = edited.resize(scene_img.size, Image.LANCZOS)
+            poly_mask = Image.new("L", scene_img.size, 0)
+            ImageDraw.Draw(poly_mask).polygon(
+                _polygon_to_pixels(mask_polygon, *scene_img.size), fill=255
+            )
+            clipped = Image.composite(edited, scene_img, poly_mask)
+            buf = io.BytesIO()
+            clipped.save(buf, format="PNG")
+            return buf.getvalue()
+
+        if mask_engine == "gpt_fal":
+            # OpenAI's gpt-image-1 routed through fal.ai's hosted
+            # proxy. Charges against FAL_KEY rather than OpenAI
+            # billing, which is the only working path right now.
+            # The model re-renders the masked region using the
+            # reference for appearance and the scene for perspective
+            # — visibly higher fidelity than FLUX-Kontext-LoRA.
+            fal = falai or FalAI()
+            edit_resp = await fal.gpt_image.edit(
+                scene=(scene_bytes, scene_mime),
+                mask=(aux_bytes, "image/png"),
+                references=[(reference_bytes, reference_mime)],
+                prompt=f"{instruction}. {template}",
+                input_fidelity="high",
+                quality="high",
+            )
+            raw_bytes = _post_clip(edit_resp.image_bytes)
+            raw_mime = "image/png"
+            edit_text = ""
+
+        elif mask_engine == "openai":
+            # Native gpt-image-1 path through OpenAI directly.
+            # Requires OPENAI_API_KEY billing to be unlocked.
             oai_mask = _build_openai_mask(scene_bytes, mask_polygon)
             oai = openai or OpenAI()
             oai_resp = await oai.image_edit.edit(
@@ -449,8 +486,8 @@ async def insert_object(
                 size="auto",
                 quality=openai_quality,
             )
-            raw_bytes = oai_resp.image_bytes
-            raw_mime = oai_resp.mime_type
+            raw_bytes = _post_clip(oai_resp.image_bytes)
+            raw_mime = "image/png"
             edit_text = ""
 
         elif mask_engine == "flux_prepaste":

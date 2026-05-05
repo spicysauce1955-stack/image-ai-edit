@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "pillow>=10.4",
+    "fal-client>=0.5",
 ]
 
 [project.optional-dependencies]

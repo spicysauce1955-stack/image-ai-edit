@@ -41,6 +41,10 @@ BASE_URL = "https://fal.run"
 QUEUE_URL = "https://queue.fal.run"
 DEFAULT_RELIGHT_MODEL = "fal-ai/iclight-v2"
 DEFAULT_INPAINT_MODEL = "fal-ai/flux-kontext-lora/inpaint"
+# gpt-image-1.5/edit-image has a known fal-side queue-routing bug
+# ("Path /edit-image not found"); the gpt-image-1 (v1) edit-image
+# endpoint works through the same SDK path.
+DEFAULT_GPTIMAGE_MODEL = "fal-ai/gpt-image-1/edit-image"
 POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 600.0
 
@@ -251,8 +255,112 @@ class FalAIInpaintRef:
         )
 
 
+class FalAIGPTImage:
+    """fal.ai's hosted ``gpt-image-1/edit-image`` — OpenAI's gpt-image-1
+    routed through fal so we charge against ``FAL_KEY`` rather than an
+    OpenAI account.
+
+    Why this exists in addition to FLUX-Kontext-LoRA Inpaint
+    --------------------------------------------------------
+    FLUX-Kontext-LoRA enforces masks well but produces a "generalized"
+    version of the reference object — slats and posts smoothed into a
+    flat panel — even with strong prompts. gpt-image-1 is a vision-
+    grounded transformer that **re-renders** the masked region using
+    the reference for appearance and the scene for perspective,
+    yielding visibly higher reference fidelity (correct slats, posts,
+    shadows, and perspective recession in our fence test).
+
+    Caveat: gpt-image-1's mask is *soft* — the model often regenerates
+    pixels beyond the mask boundary too (per the OpenAI developer
+    forum). The pipeline always PIL-composites the result back onto
+    the original scene using our binary polygon mask, so the polygon
+    boundary is enforced deterministically regardless of model
+    behaviour.
+
+    SDK vs raw HTTP
+    ---------------
+    fal's queue endpoint has a known routing bug for sub-pathed models
+    like ``gpt-image-1/edit-image`` — submit returns a result URL that
+    404s. We use ``fal_client.subscribe`` which works around the bug
+    internally. The synchronous edit takes ~30–70 s per call.
+
+    Native fields (per fal's docs):
+
+    - ``image_urls``     : list[str] — scene + reference images.
+                           Convention: scene first, refs after.
+    - ``mask_image_url`` : str       — PNG, white = inpaint region.
+    - ``prompt``         : str       — instruction.
+    - ``input_fidelity`` : "low"|"high"
+    - ``quality``        : "auto"|"low"|"medium"|"high"
+    - ``image_size``     : "auto"|"1024x1024"|"1536x1024"|"1024x1536"
+    """
+
+    def __init__(self, provider: FalAI) -> None:
+        self._provider = provider
+
+    async def edit(
+        self,
+        scene: tuple[bytes, str],
+        mask: tuple[bytes, str],
+        references: list[tuple[bytes, str]],
+        prompt: str,
+        *,
+        model: str | None = None,
+        input_fidelity: str = "high",
+        quality: str = "high",
+        image_size: str = "auto",
+        **kwargs: Any,
+    ) -> EditResponse:
+        """Edit via fal.ai's gpt-image-1 proxy.
+
+        Mask convention: **white = inpaint, black = preserve** (standard
+        diffusion semantics). The pipeline rasterizes the polygon
+        white-on-black before calling here.
+        """
+        import fal_client
+        import os
+
+        # fal_client reads FAL_KEY from the env at call time; ensure
+        # the key from this provider is the one in scope (the helper
+        # tolerates the env var being set elsewhere too).
+        os.environ.setdefault("FAL_KEY", self._provider.api_key)
+
+        scene_bytes, scene_mime = scene
+        mask_bytes, mask_mime = mask
+
+        image_uris = [_data_uri(scene_bytes, scene_mime)]
+        for rb, rm in references:
+            image_uris.append(_data_uri(rb, rm))
+
+        arguments: dict[str, Any] = {
+            "prompt": prompt,
+            "image_urls": image_uris,
+            "mask_image_url": _data_uri(mask_bytes, mask_mime),
+            "input_fidelity": input_fidelity,
+            "quality": quality,
+            "image_size": image_size,
+        }
+        arguments.update(kwargs)
+
+        # fal_client.subscribe is sync; run on a worker thread so we
+        # don't block the event loop.
+        result = await asyncio.to_thread(
+            fal_client.subscribe,
+            model or DEFAULT_GPTIMAGE_MODEL,
+            arguments=arguments,
+            with_logs=False,
+        )
+
+        url = _first_image_url(result)
+        return EditResponse(
+            image_bytes=await _download(url),
+            mime_type="image/png",
+            raw=result,
+        )
+
+
 class FalAI(BaseProvider):
-    """fal.ai REST client. Exposes IC-Light + FLUX-Kontext-LoRA inpaint."""
+    """fal.ai REST client. Exposes IC-Light, FLUX-Kontext-LoRA inpaint, and gpt-image-1.5."""
 
     def __init__(
         self,
@@ -263,6 +371,7 @@ class FalAI(BaseProvider):
         super().__init__(api_key=key, base_url=base_url)
         self.relight = FalAIRelight(self)
         self.inpaint = FalAIInpaintRef(self)
+        self.gpt_image = FalAIGPTImage(self)
 
     @property
     def name(self) -> str:
