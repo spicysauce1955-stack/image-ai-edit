@@ -83,7 +83,8 @@
         <label class="field">
           <span class="label">Mask engine <small class="muted">(mask mode only)</small></span>
           <select id="mask-engine">
-            <option value="gpt_fal" selected>gpt-image-1 via fal.ai (default — strongest reference fidelity)</option>
+            <option value="gpt_fal" selected>gpt-image-1 via fal.ai (default — re-renders reference in scene)</option>
+            <option value="anydoor">AnyDoor via Replicate (purpose-built for object teleportation; needs Replicate credit)</option>
             <option value="openai">OpenAI gpt-image-1 direct (needs OpenAI billing)</option>
             <option value="flux_prepaste">FLUX prepaste fallback (lower fidelity)</option>
           </select>

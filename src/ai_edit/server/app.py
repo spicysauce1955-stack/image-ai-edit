@@ -105,7 +105,7 @@ def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
 
 
 VALID_MODES: set[str] = {"free", "mask"}
-VALID_MASK_ENGINES: set[str] = {"gpt_fal", "openai", "flux_prepaste"}
+VALID_MASK_ENGINES: set[str] = {"gpt_fal", "anydoor", "openai", "flux_prepaste"}
 
 
 def create_app() -> FastAPI:

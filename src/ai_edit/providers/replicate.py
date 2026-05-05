@@ -40,6 +40,7 @@ import httpx
 from ..config import get_env
 from ..models.base import (
     BaseProvider,
+    EditResponse,
     SegmentationMask,
     SegmentationModel,
     SegmentationResponse,
@@ -47,8 +48,10 @@ from ..models.base import (
 
 BASE_URL = "https://api.replicate.com"
 GROUNDED_SAM_MODEL = "schananas/grounded_sam"
+GROUNDED_SAM_VERSION = "ee871c19efb1941f55f66a3d7d960428c8a5afcb77449547fe8e5a3ab9ebc21c"
+ANYDOOR_VERSION = "542c963129c4661ab53a875b1b9a84b2102ca784cf872ef2752a468721c0eb2a"
 POLL_INTERVAL_S = 1.0
-POLL_TIMEOUT_S = 120.0
+POLL_TIMEOUT_S = 300.0
 
 
 def _data_uri(image_bytes: bytes, mime_type: str) -> str:
@@ -100,6 +103,7 @@ class ReplicateGroundedSAM(SegmentationModel):
         prompt_str = ",".join(p.strip() for p in prompts)
 
         payload: dict[str, Any] = {
+            "version": GROUNDED_SAM_VERSION,
             "input": {
                 "image": image_uri,
                 "mask_prompt": prompt_str,
@@ -108,13 +112,16 @@ class ReplicateGroundedSAM(SegmentationModel):
                 "negative_mask_prompt": kwargs.pop("negative_mask_prompt", ""),
                 # 0 = use the model's default mask threshold.
                 "adjustment_factor": kwargs.pop("adjustment_factor", 0),
-            }
+            },
         }
         payload["input"].update(kwargs)
 
         async with httpx.AsyncClient(timeout=POLL_TIMEOUT_S) as client:
+            # Versioned /v1/predictions endpoint — the model-aliased
+            # /v1/models/{owner}/{name}/predictions form 404s on
+            # models without a "default" version.
             create = await client.post(
-                f"{self._provider.base_url}/v1/models/{GROUNDED_SAM_MODEL}/predictions",
+                f"{self._provider.base_url}/v1/predictions",
                 headers=self._provider._headers(),
                 json=payload,
             )
@@ -178,13 +185,102 @@ class ReplicateGroundedSAM(SegmentationModel):
         return prediction
 
 
-class Replicate(BaseProvider):
-    """Replicate REST client. Currently exposes segmentation only.
+class ReplicateAnyDoor:
+    """AnyDoor — zero-shot reference-conditioned object insertion.
 
-    Add new capabilities by attaching another handler in ``__init__``
-    (e.g. ``self.upscale = ReplicateUpscale(self)``) — see the M5 plan
-    in ``docs/poc-plan.md`` for the SAM 2 click-refine extension.
+    Replicate model: ``ali-vilab/anydoor`` (CVPR 2024 paper). AnyDoor
+    takes a target image + binary mask (where the object should go)
+    and a reference image + reference mask (which part of the
+    reference IS the object), and *re-renders* the reference inside
+    the target mask in the target's perspective. This is the textbook
+    primitive for our use case — it's precisely the "identity +
+    detail" feature design that fixes the "model regenerates beyond
+    the polygon" problem we hit with gpt-image-1.
+
+    Native fields (per ``ali-vilab/anydoor`` schema):
+
+    - ``bg_image_path``        : target scene
+    - ``bg_mask_path``         : where the object goes (white = inpaint)
+    - ``reference_image_path`` : the reference object photo
+    - ``reference_image_mask`` : which part of the reference IS the
+                                 object (white = object, black = bg)
+    - ``steps``                : default 50
+    - ``guidance_scale``       : default 4.5
+    - ``control_strength``     : default 1.0
+    - ``enable_shape_control`` : default False
+
+    The reference_image_mask is REQUIRED — if the caller doesn't have
+    one we auto-segment it via Grounded-SAM in the pipeline before
+    calling here. AnyDoor without a clean reference mask pulls in
+    sky/grass background from the reference photo.
     """
+
+    def __init__(self, provider: Replicate) -> None:
+        self._provider = provider
+
+    async def edit(
+        self,
+        scene: tuple[bytes, str],
+        scene_mask: tuple[bytes, str],
+        reference: tuple[bytes, str],
+        reference_mask: tuple[bytes, str],
+        *,
+        steps: int = 50,
+        guidance_scale: float = 4.5,
+        control_strength: float = 1.0,
+        enable_shape_control: bool = False,
+        **kwargs: Any,
+    ) -> EditResponse:
+        """Run AnyDoor object teleportation.
+
+        All four inputs are ``(bytes, mime)`` tuples. The two masks
+        must be PNGs whose dimensions match their respective images.
+        """
+        sb, sm = scene
+        smb, smm = scene_mask
+        rb, rm = reference
+        rmb, rmm = reference_mask
+
+        payload = {
+            "version": ANYDOOR_VERSION,
+            "input": {
+                "bg_image_path":        _data_uri(sb, sm),
+                "bg_mask_path":         _data_uri(smb, smm),
+                "reference_image_path": _data_uri(rb, rm),
+                "reference_image_mask": _data_uri(rmb, rmm),
+                "steps": steps,
+                "guidance_scale": guidance_scale,
+                "control_strength": control_strength,
+                "enable_shape_control": enable_shape_control,
+            },
+        }
+        payload["input"].update(kwargs)
+
+        async with httpx.AsyncClient(timeout=POLL_TIMEOUT_S) as client:
+            create = await client.post(
+                f"{self._provider.base_url}/v1/predictions",
+                headers=self._provider._headers(),
+                json=payload,
+            )
+            create.raise_for_status()
+            prediction = create.json()
+
+            # Reuse the polling helper from the segmentation handler.
+            seg = self._provider.segmentation
+            prediction = await seg._wait(client, prediction)  # type: ignore[attr-defined]
+
+            output = prediction.get("output")
+            url = output if isinstance(output, str) else (output[0] if output else None)
+            if not url:
+                raise RuntimeError(f"AnyDoor returned no image. Raw: {prediction}")
+            r = await client.get(url)
+            r.raise_for_status()
+
+        return EditResponse(image_bytes=r.content, mime_type="image/png", raw=prediction)
+
+
+class Replicate(BaseProvider):
+    """Replicate REST client. Exposes Grounded-SAM segmentation + AnyDoor."""
 
     def __init__(
         self,
@@ -194,6 +290,7 @@ class Replicate(BaseProvider):
         key = api_key or get_env("REPLICATE_API_TOKEN", required=True)
         super().__init__(api_key=key, base_url=base_url)
         self.segmentation = ReplicateGroundedSAM(self)
+        self.anydoor = ReplicateAnyDoor(self)
 
     @property
     def name(self) -> str:

@@ -73,7 +73,7 @@ from ..models.base import SegmentationMask
 from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
-MaskEngine = Literal["gpt_fal", "openai", "flux_prepaste"]
+MaskEngine = Literal["gpt_fal", "anydoor", "openai", "flux_prepaste"]
 AuxKind = Literal["mask", "previous"]
 
 
@@ -113,14 +113,20 @@ DEFAULT_FREE_PROMPT = (
 # not an *insert from scratch* prompt — the reference is already in
 # the right place; the model's job is to integrate it cleanly.
 DEFAULT_MASK_PROMPT = (
-    "Use the reference image to insert the object into the masked region. "
-    "Reproduce the object's design, materials, colour, and surface "
-    "details (slats, posts, panels, seams, ribs, edges, bolts, joints — "
-    "whatever the reference shows) exactly. Re-render the object in the "
-    "scene's perspective so it sits naturally in the masked area at the "
-    "correct angle and scale. Match the scene's lighting, add a soft "
-    "realistic ground shadow, and keep occlusion of foreground objects "
-    "intact. Do not change anything outside the masked region."
+    "PRESERVATION-CRITICAL EDIT. Inside the WHITE region of the mask: "
+    "render the object from the reference image — preserve its design, "
+    "materials, colour, and every structural detail (slats, posts, "
+    "panels, seams, ribs, edges, bolts, joints — whatever the reference "
+    "shows) exactly. Re-render the object in the scene's perspective so "
+    "it sits naturally in the masked area at the correct angle and "
+    "scale. Match the scene's lighting and cast a soft realistic ground "
+    "shadow.\n\n"
+    "OUTSIDE the white region: every pixel must remain identical to the "
+    "input scene. Do not redraw, repaint, recolour, restyle, or even "
+    "slightly modify the lawn, the patio, planters, umbrellas, existing "
+    "fences outside the white region, the house, the sky, or any "
+    "trees/foliage. The only change in the entire output image is the "
+    "new object inside the white region."
 )
 
 DEFAULT_REFINE_PROMPT = (
@@ -343,6 +349,7 @@ async def insert_object(
     mask_engine: MaskEngine = "gpt_fal",
     openai_quality: str = "high",
     openai: OpenAI | None = None,
+    post_clip_to_mask: bool = False,
 ) -> InsertResult:
     """Run the insertion pipeline end-to-end.
 
@@ -432,12 +439,18 @@ async def insert_object(
 
         template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
 
-        # Post-clip helper: every mask-mode engine ends with a strict
-        # PIL composite onto the original scene using our binary
-        # polygon mask, so the polygon boundary is enforced
-        # deterministically regardless of any soft-mask behaviour
-        # the upstream model exhibits.
-        def _post_clip(model_output: bytes) -> bytes:
+        # Optional post-clip helper. When enabled, composites the
+        # model's output back onto the original scene through our
+        # binary polygon mask, guaranteeing 100% pixel equality
+        # outside the polygon. Disabled by default so callers see the
+        # model's raw output and can decide whether the polygon
+        # boundary should be enforced post-hoc — diffusion-style
+        # clipping is a heavy hammer that hides interesting model
+        # behaviour (e.g. shadows that *should* extend past the
+        # polygon onto the ground).
+        def _maybe_post_clip(model_output: bytes) -> bytes:
+            if not post_clip_to_mask:
+                return model_output
             with Image.open(io.BytesIO(model_output)) as raw:
                 edited = raw.convert("RGB")
             with Image.open(io.BytesIO(scene_bytes)) as raw_scene:
@@ -455,11 +468,14 @@ async def insert_object(
 
         if mask_engine == "gpt_fal":
             # OpenAI's gpt-image-1 routed through fal.ai's hosted
-            # proxy. Charges against FAL_KEY rather than OpenAI
-            # billing, which is the only working path right now.
-            # The model re-renders the masked region using the
-            # reference for appearance and the scene for perspective
-            # — visibly higher fidelity than FLUX-Kontext-LoRA.
+            # proxy. The model re-renders the masked region using
+            # the reference for appearance and the scene for
+            # perspective — visibly higher fidelity than FLUX.
+            #
+            # Empirically (sweep in docs/results/12-*) pinning
+            # image_size to 1536x1024 (3:2, matching most phone
+            # photos) instead of "auto" plus a strict preservation
+            # prompt cuts outside-mask drift from ~24% to ~6.5%.
             fal = falai or FalAI()
             edit_resp = await fal.gpt_image.edit(
                 scene=(scene_bytes, scene_mime),
@@ -468,8 +484,52 @@ async def insert_object(
                 prompt=f"{instruction}. {template}",
                 input_fidelity="high",
                 quality="high",
+                image_size="1536x1024",
             )
-            raw_bytes = _post_clip(edit_resp.image_bytes)
+            raw_bytes = _maybe_post_clip(edit_resp.image_bytes)
+            raw_mime = "image/png"
+            edit_text = ""
+
+        elif mask_engine == "anydoor":
+            # AnyDoor (CVPR 2024) on Replicate. Designed exactly for
+            # this primitive: re-render reference object inside a
+            # mask in the target scene's perspective. Requires a
+            # reference mask isolating the object — we generate one
+            # automatically via Grounded-SAM (also Replicate, same
+            # key) using "object" or the user's instruction as the
+            # text prompt for the segmenter.
+            rep = replicate or Replicate()
+            mask_bytes = aux_bytes  # white-on-black scene mask
+
+            # Auto-segment the reference object. We use the user's
+            # instruction (truncated) as the segmentation prompt;
+            # Grounded-SAM is open-vocab so this works for any class.
+            seg_prompt = (instruction.split(".")[0])[:60].strip() or "object"
+            seg_resp = await rep.segmentation.segment(
+                reference_bytes, [seg_prompt], mime_type=reference_mime
+            )
+            ref_mask_bytes: bytes | None = None
+            for m in seg_resp.masks:
+                if m.label != "combined":
+                    ref_mask_bytes = m.image_bytes
+                    break
+            if ref_mask_bytes is None and seg_resp.masks:
+                ref_mask_bytes = seg_resp.masks[0].image_bytes
+            if ref_mask_bytes is None:
+                raise RuntimeError(
+                    f"Grounded-SAM produced no mask for reference (prompt: {seg_prompt!r})."
+                )
+
+            ad_resp = await rep.anydoor.edit(
+                scene=(scene_bytes, scene_mime),
+                scene_mask=(mask_bytes, "image/png"),
+                reference=(reference_bytes, reference_mime),
+                reference_mask=(ref_mask_bytes, "image/png"),
+                steps=50,
+                guidance_scale=4.5,
+                control_strength=1.0,
+            )
+            raw_bytes = _maybe_post_clip(ad_resp.image_bytes)
             raw_mime = "image/png"
             edit_text = ""
 
@@ -486,7 +546,7 @@ async def insert_object(
                 size="auto",
                 quality=openai_quality,
             )
-            raw_bytes = _post_clip(oai_resp.image_bytes)
+            raw_bytes = _maybe_post_clip(oai_resp.image_bytes)
             raw_mime = "image/png"
             edit_text = ""
 
