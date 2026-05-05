@@ -45,6 +45,7 @@ DEFAULT_INPAINT_MODEL = "fal-ai/flux-kontext-lora/inpaint"
 # ("Path /edit-image not found"); the gpt-image-1 (v1) edit-image
 # endpoint works through the same SDK path.
 DEFAULT_GPTIMAGE_MODEL = "fal-ai/gpt-image-1/edit-image"
+DEFAULT_NANO_BANANA_MODEL = "fal-ai/nano-banana-pro/edit"
 POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 600.0
 
@@ -359,8 +360,65 @@ class FalAIGPTImage:
         )
 
 
+class FalAINanoBanana:
+    """Nano Banana family on fal.ai (Google's Gemini-3 image-edit models).
+
+    Endpoints:
+      - fal-ai/nano-banana-pro/edit  — Gemini 3 Pro Image (most capable)
+      - fal-ai/nano-banana-2/edit    — Gemini 3.1 Flash Image
+      - fal-ai/nano-banana/edit      — Gemini 2.5 Flash Image (original)
+
+    These are mask-LESS edit endpoints: ``image_urls`` (list, scene
+    first then references) + ``prompt``. The pipeline's ``gemini_crop``
+    mask engine drives spatial control by cropping the polygon's
+    bounding-box region BEFORE the call (so the model can't relocate
+    to "where this object normally goes" — those locations aren't in
+    the cropped view) and reassembling the edited crop into the full
+    scene afterwards.
+    """
+
+    def __init__(self, provider: FalAI) -> None:
+        self._provider = provider
+
+    async def edit(
+        self,
+        scene: tuple[bytes, str],
+        references: list[tuple[bytes, str]],
+        prompt: str,
+        *,
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> EditResponse:
+        """Mask-LESS Gemini-family edit. ``image_urls = [scene, *refs]``."""
+        import fal_client
+        import os
+
+        os.environ.setdefault("FAL_KEY", self._provider.api_key)
+
+        sb, sm = scene
+        image_uris = [_data_uri(sb, sm)]
+        for rb, rm in references:
+            image_uris.append(_data_uri(rb, rm))
+
+        arguments: dict[str, Any] = {"prompt": prompt, "image_urls": image_uris}
+        arguments.update(kwargs)
+
+        result = await asyncio.to_thread(
+            fal_client.subscribe,
+            model or DEFAULT_NANO_BANANA_MODEL,
+            arguments=arguments,
+            with_logs=False,
+        )
+        url = _first_image_url(result)
+        return EditResponse(
+            image_bytes=await _download(url),
+            mime_type="image/png",
+            raw=result,
+        )
+
+
 class FalAI(BaseProvider):
-    """fal.ai REST client. Exposes IC-Light, FLUX-Kontext-LoRA inpaint, and gpt-image-1.5."""
+    """fal.ai REST client. Exposes IC-Light, FLUX-Kontext-LoRA inpaint, gpt-image-1, and Nano Banana."""
 
     def __init__(
         self,
@@ -372,6 +430,7 @@ class FalAI(BaseProvider):
         self.relight = FalAIRelight(self)
         self.inpaint = FalAIInpaintRef(self)
         self.gpt_image = FalAIGPTImage(self)
+        self.nano_banana = FalAINanoBanana(self)
 
     @property
     def name(self) -> str:

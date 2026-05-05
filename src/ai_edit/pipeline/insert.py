@@ -73,7 +73,14 @@ from ..models.base import SegmentationMask
 from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
-MaskEngine = Literal["anydoor_chain", "gpt_fal", "anydoor", "openai", "flux_prepaste"]
+MaskEngine = Literal[
+    "gemini_crop",     # default — crop polygon bbox+pad → Nano Banana edit → feathered reassemble
+    "anydoor_chain",   # AnyDoor placement + gpt-image-1 refinement
+    "gpt_fal",         # gpt-image-1 alone (ignores polygon outside semantic prior)
+    "anydoor",         # AnyDoor alone
+    "openai",          # OpenAI direct
+    "flux_prepaste",   # FLUX prepaste fallback
+]
 AuxKind = Literal["mask", "previous"]
 
 
@@ -230,6 +237,102 @@ def _rasterize_polygon(
     return buf.getvalue()
 
 
+def _crop_with_marker(
+    scene_bytes: bytes,
+    polygon_norm: list[tuple[float, float]],
+    *,
+    pad_frac: float = 0.30,
+) -> tuple[bytes, tuple[int, int, int, int]]:
+    """Crop the scene around the polygon and burn a marker on the crop.
+
+    Returns ``(crop_png_bytes, (px0, py0, px1, py1))``. The crop is the
+    polygon's bounding box expanded by ``pad_frac`` on each side
+    (clamped to the scene) so the model sees enough surrounding
+    context (ground line, lighting) to integrate cleanly.
+
+    A magenta polygon (translucent fill + solid outline) is drawn on
+    the cropped scene so the model knows where to place the object —
+    crucially, *the cropped view contains no other instances of the
+    target object class*, so the model can't relocate to its semantic
+    prior. That's the trick that makes this pipeline work where
+    direct mask-based pipelines silently relocate the object.
+    """
+    if len(polygon_norm) < 3:
+        raise ValueError(f"Polygon needs at least 3 vertices, got {len(polygon_norm)}.")
+
+    with Image.open(io.BytesIO(scene_bytes)) as raw:
+        scene = raw.convert("RGB")
+    W, H = scene.size
+
+    pix = _polygon_to_pixels(polygon_norm, W, H)
+    xs = [p[0] for p in pix]
+    ys = [p[1] for p in pix]
+    bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
+    bw, bh = bx1 - bx0, by1 - by0
+
+    px0 = max(0, bx0 - int(bw * pad_frac))
+    py0 = max(0, by0 - int(bh * pad_frac))
+    px1 = min(W, bx1 + int(bw * pad_frac))
+    py1 = min(H, by1 + int(bh * pad_frac))
+
+    crop = scene.crop((px0, py0, px1, py1)).convert("RGBA")
+    local = [(p[0] - px0, p[1] - py0) for p in pix]
+
+    fill_layer = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+    ImageDraw.Draw(fill_layer).polygon(local, fill=(255, 0, 220, 130))
+    line_layer = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+    ImageDraw.Draw(line_layer).polygon(local, outline=(255, 0, 220, 255), width=4)
+
+    composite = Image.alpha_composite(Image.alpha_composite(crop, fill_layer), line_layer)
+    out = composite.convert("RGB")
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue(), (px0, py0, px1, py1)
+
+
+def _reassemble_crop(
+    scene_bytes: bytes,
+    edited_crop_bytes: bytes,
+    crop_box: tuple[int, int, int, int],
+    *,
+    feather_frac: float = 1 / 12,
+) -> bytes:
+    """Composite the edited crop back into the scene with a feathered mask.
+
+    The mask is a soft-edged rectangle (Gaussian-blurred) inset from
+    the crop boundary, so the edit blends into the surrounding
+    untouched scene without visible seams. Pixels outside the crop
+    region are byte-identical to the original scene.
+    """
+    from PIL import ImageFilter
+
+    with Image.open(io.BytesIO(scene_bytes)) as raw:
+        scene = raw.convert("RGB")
+    with Image.open(io.BytesIO(edited_crop_bytes)) as raw_edited:
+        edited = raw_edited.convert("RGB")
+
+    px0, py0, px1, py1 = crop_box
+    target_size = (px1 - px0, py1 - py0)
+    if edited.size != target_size:
+        edited = edited.resize(target_size, Image.LANCZOS)
+
+    inner_pad = max(8, int(min(target_size) * feather_frac))
+    fmask = Image.new("L", target_size, 0)
+    ImageDraw.Draw(fmask).rectangle(
+        (inner_pad, inner_pad, target_size[0] - inner_pad, target_size[1] - inner_pad),
+        fill=255,
+    )
+    fmask = fmask.filter(ImageFilter.GaussianBlur(radius=inner_pad / 1.5))
+
+    blended = Image.composite(edited, scene.crop(crop_box), fmask)
+    out = scene.copy()
+    out.paste(blended, (px0, py0))
+
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _build_openai_mask(
     scene_bytes: bytes,
     polygon_norm: list[tuple[float, float]],
@@ -361,7 +464,9 @@ async def insert_object(
     inpaint_steps: int = 40,
     inpaint_strength: float = 0.45,
     reference_crop: tuple[float, float] | None = None,
-    mask_engine: MaskEngine = "anydoor_chain",
+    mask_engine: MaskEngine = "gemini_crop",
+    gemini_crop_pad_frac: float = 0.30,
+    gemini_crop_model: str | None = None,
     openai_quality: str = "high",
     openai: OpenAI | None = None,
     post_clip_to_mask: bool = False,
@@ -481,7 +586,37 @@ async def insert_object(
             clipped.save(buf, format="PNG")
             return buf.getvalue()
 
-        if mask_engine == "anydoor_chain":
+        if mask_engine == "gemini_crop":
+            # Crop+edit+reassemble. Bypasses the semantic-prior trap:
+            # the model only sees a region around the polygon, not
+            # other places in the scene where the object class
+            # naturally lives, so it can't relocate. Empirically this
+            # is the fastest (~30s) AND highest-fidelity engine —
+            # see docs/results/21-* for the sweep that established it.
+            crop_bytes, crop_box = _crop_with_marker(
+                scene_bytes, mask_polygon, pad_frac=gemini_crop_pad_frac
+            )
+            fal = falai or FalAI()
+            simple_prompt = (
+                f"{instruction}. Place the object from image 2 inside the "
+                "magenta marker region in image 1. Match the scene's "
+                "perspective and lighting; the marker disappears in the "
+                "output."
+            )
+            edit_resp = await fal.nano_banana.edit(
+                scene=(crop_bytes, "image/png"),
+                references=[(reference_bytes, reference_mime)],
+                prompt=simple_prompt,
+                model=gemini_crop_model,
+            )
+            reassembled = _reassemble_crop(
+                scene_bytes, edit_resp.image_bytes, crop_box
+            )
+            raw_bytes = _maybe_post_clip(reassembled)
+            raw_mime = "image/png"
+            edit_text = ""
+
+        elif mask_engine == "anydoor_chain":
             # Two-pass pipeline: AnyDoor places the object correctly
             # in the polygon (gpt_fal can't — it ignores the mask
             # when the polygon conflicts with its semantic prior),
