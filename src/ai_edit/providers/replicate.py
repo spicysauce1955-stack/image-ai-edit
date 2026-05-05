@@ -63,6 +63,43 @@ def _data_uri(image_bytes: bytes, mime_type: str) -> str:
     return f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
 
 
+async def _post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    json: dict[str, Any],
+    retries: int = 6,
+) -> httpx.Response:
+    """POST with exponential backoff on 429.
+
+    Replicate's per-second rate limit on free / hobby tiers fires on
+    back-to-back submissions (e.g. when the pipeline calls Grounded-SAM
+    immediately followed by AnyDoor). The backoff respects the
+    ``Retry-After`` header when Replicate provides one, otherwise it
+    doubles from 5 s up to ~5 min total.
+    """
+    delay = 5.0
+    last_resp: httpx.Response | None = None
+    for attempt in range(retries):
+        resp = await client.post(url, headers=headers, json=json)
+        if resp.status_code != 429:
+            return resp
+        last_resp = resp
+        retry_after = resp.headers.get("Retry-After")
+        try:
+            wait = float(retry_after) if retry_after else delay
+        except ValueError:
+            wait = delay
+        # Cap any single sleep at ~60 s so the helper stays responsive.
+        await asyncio.sleep(min(60.0, wait))
+        delay = min(60.0, delay * 2)
+    # Fall through: surface the last 429 to the caller.
+    assert last_resp is not None
+    last_resp.raise_for_status()
+    return last_resp
+
+
 class ReplicateGroundedSAM(SegmentationModel):
     """Grounded-SAM client.
 
@@ -120,7 +157,8 @@ class ReplicateGroundedSAM(SegmentationModel):
             # Versioned /v1/predictions endpoint — the model-aliased
             # /v1/models/{owner}/{name}/predictions form 404s on
             # models without a "default" version.
-            create = await client.post(
+            create = await _post_with_retry(
+                client,
                 f"{self._provider.base_url}/v1/predictions",
                 headers=self._provider._headers(),
                 json=payload,
@@ -271,7 +309,8 @@ class ReplicateAnyDoor:
         payload["input"].update(kwargs)
 
         async with httpx.AsyncClient(timeout=POLL_TIMEOUT_S) as client:
-            create = await client.post(
+            create = await _post_with_retry(
+                client,
                 f"{self._provider.base_url}/v1/predictions",
                 headers=self._provider._headers(),
                 json=payload,
