@@ -133,14 +133,28 @@ class ReplicateGroundedSAM(SegmentationModel):
             output = prediction.get("output") or []
             mask_urls = output if isinstance(output, list) else [output]
 
-            # Replicate may return N masks for N prompts plus a combined
-            # union mask. zip() naturally truncates to the shorter list,
-            # which is the behavior we want regardless of which side
-            # comes up short.
+            # schananas/grounded_sam returns 4 outputs in this order:
+            #   [0] annotated_picture_mask.jpg   — visualization with red bboxes
+            #   [1] neg_annotated_picture_mask  — negative-prompt visualization
+            #   [2] mask.jpg                    — the actual binary mask we want
+            #   [3] inverted_mask.jpg           — inverse of [2]
+            # The previous code zipped prompts vs URLs and grabbed [0],
+            # which is the *visualization*, not a binary mask. AnyDoor
+            # silently treated that as if the whole image were the
+            # object. Now we label by filename so callers can pick.
+            label_for_filename = {
+                "annotated_picture_mask": "visualization",
+                "neg_annotated_picture_mask": "neg_visualization",
+                "mask": prompts[0] if prompts else "binary",  # the canonical binary mask
+                "inverted_mask": "inverted",
+            }
             masks: list[SegmentationMask] = []
-            for label, url in zip(prompts + ["combined"], mask_urls):
+            for url in mask_urls:
                 if not url:
                     continue
+                # filename without extension: ".../mask.jpg" → "mask"
+                fname = url.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                label = label_for_filename.get(fname, fname)
                 resp = await client.get(url)
                 resp.raise_for_status()
                 masks.append(

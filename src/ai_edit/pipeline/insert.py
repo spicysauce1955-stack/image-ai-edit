@@ -501,23 +501,26 @@ async def insert_object(
             rep = replicate or Replicate()
             mask_bytes = aux_bytes  # white-on-black scene mask
 
-            # Auto-segment the reference object. We use the user's
-            # instruction (truncated) as the segmentation prompt;
-            # Grounded-SAM is open-vocab so this works for any class.
+            # Auto-segment the reference object via Grounded-SAM. The
+            # binary mask we want is labelled with the segmentation
+            # prompt (see ReplicateGroundedSAM filename mapping). The
+            # visualization with red bboxes is labelled "visualization"
+            # — picking that as a mask was a silent bug that made
+            # AnyDoor treat the whole reference as the object.
             seg_prompt = (instruction.split(".")[0])[:60].strip() or "object"
             seg_resp = await rep.segmentation.segment(
                 reference_bytes, [seg_prompt], mime_type=reference_mime
             )
             ref_mask_bytes: bytes | None = None
             for m in seg_resp.masks:
-                if m.label != "combined":
+                if m.label == seg_prompt:
                     ref_mask_bytes = m.image_bytes
                     break
-            if ref_mask_bytes is None and seg_resp.masks:
-                ref_mask_bytes = seg_resp.masks[0].image_bytes
             if ref_mask_bytes is None:
                 raise RuntimeError(
-                    f"Grounded-SAM produced no mask for reference (prompt: {seg_prompt!r})."
+                    f"Grounded-SAM produced no binary mask for reference "
+                    f"(prompt: {seg_prompt!r}). Got labels: "
+                    f"{[m.label for m in seg_resp.masks]}"
                 )
 
             ad_resp = await rep.anydoor.edit(
