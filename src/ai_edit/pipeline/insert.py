@@ -73,7 +73,7 @@ from ..models.base import SegmentationMask
 from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
-MaskEngine = Literal["gpt_fal", "anydoor", "openai", "flux_prepaste"]
+MaskEngine = Literal["anydoor_chain", "gpt_fal", "anydoor", "openai", "flux_prepaste"]
 AuxKind = Literal["mask", "previous"]
 
 
@@ -127,6 +127,21 @@ DEFAULT_MASK_PROMPT = (
     "fences outside the white region, the house, the sky, or any "
     "trees/foliage. The only change in the entire output image is the "
     "new object inside the white region."
+)
+
+# The refinement-pass prompt used by the AnyDoor → gpt_fal chain.
+# Crucial: "do NOT move" language to prevent gpt_fal from relocating
+# the fence back to its semantic-prior location. The R2 sweep variant
+# without this language relocated the AnyDoor result.
+CHAIN_REFINE_PROMPT = (
+    "Polish and sharpen the object that already exists inside the white "
+    "masked region. Keep the object in the EXACT same position and at "
+    "the same scale — do not move, duplicate, or relocate it. Use the "
+    "reference image to make its surfaces, edges, materials, and texture "
+    "crisper and more photorealistic. Improve the lighting integration "
+    "with the surrounding scene and add a soft realistic ground shadow "
+    "if appropriate. Outside the white region, every pixel must remain "
+    "identical to the input scene."
 )
 
 DEFAULT_REFINE_PROMPT = (
@@ -346,7 +361,7 @@ async def insert_object(
     inpaint_steps: int = 40,
     inpaint_strength: float = 0.45,
     reference_crop: tuple[float, float] | None = None,
-    mask_engine: MaskEngine = "gpt_fal",
+    mask_engine: MaskEngine = "anydoor_chain",
     openai_quality: str = "high",
     openai: OpenAI | None = None,
     post_clip_to_mask: bool = False,
@@ -466,7 +481,68 @@ async def insert_object(
             clipped.save(buf, format="PNG")
             return buf.getvalue()
 
-        if mask_engine == "gpt_fal":
+        if mask_engine == "anydoor_chain":
+            # Two-pass pipeline: AnyDoor places the object correctly
+            # in the polygon (gpt_fal can't — it ignores the mask
+            # when the polygon conflicts with its semantic prior),
+            # then gpt_fal refines the AnyDoor output to match the
+            # reference's appearance and integrate lighting.
+            #
+            # The trick that makes the chain work: gpt_fal sees a
+            # scene that ALREADY has a fence in the polygon (from
+            # AnyDoor). Its semantic prior is satisfied — there's no
+            # need to relocate — so it polishes what's there instead
+            # of moving it. Verified empirically (variant-B sweep,
+            # docs/results/18-*).
+            rep = replicate or Replicate()
+
+            # 1. Reference mask via Grounded-SAM (binary, not viz).
+            seg_prompt = (instruction.split(".")[0])[:60].strip() or "object"
+            seg_resp = await rep.segmentation.segment(
+                reference_bytes, [seg_prompt], mime_type=reference_mime
+            )
+            ref_mask_bytes: bytes | None = None
+            for m in seg_resp.masks:
+                if m.label == seg_prompt:
+                    ref_mask_bytes = m.image_bytes
+                    break
+            if ref_mask_bytes is None:
+                raise RuntimeError(
+                    f"Grounded-SAM produced no binary mask for the reference "
+                    f"(prompt: {seg_prompt!r}). Got labels: "
+                    f"{[m.label for m in seg_resp.masks]}"
+                )
+
+            # 2. AnyDoor placement pass.
+            ad_resp = await rep.anydoor.edit(
+                scene=(scene_bytes, scene_mime),
+                scene_mask=(aux_bytes, "image/png"),
+                reference=(reference_bytes, reference_mime),
+                reference_mask=(ref_mask_bytes, "image/png"),
+                steps=50,
+                guidance_scale=4.5,
+                control_strength=1.0,
+            )
+
+            # 3. gpt_fal refinement pass — feed AnyDoor's output as
+            # the scene. The CHAIN_REFINE_PROMPT explicitly tells
+            # gpt-image-1 not to relocate; without that the model
+            # snaps the fence back to the back wall.
+            fal = falai or FalAI()
+            refine_resp = await fal.gpt_image.edit(
+                scene=(ad_resp.image_bytes, "image/png"),
+                mask=(aux_bytes, "image/png"),
+                references=[(reference_bytes, reference_mime)],
+                prompt=f"{instruction}. {CHAIN_REFINE_PROMPT}",
+                input_fidelity="high",
+                quality="high",
+                image_size="1536x1024",
+            )
+            raw_bytes = _maybe_post_clip(refine_resp.image_bytes)
+            raw_mime = "image/png"
+            edit_text = ""
+
+        elif mask_engine == "gpt_fal":
             # OpenAI's gpt-image-1 routed through fal.ai's hosted
             # proxy. The model re-renders the masked region using
             # the reference for appearance and the scene for
