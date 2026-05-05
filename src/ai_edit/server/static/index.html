@@ -83,9 +83,10 @@
         <label class="field">
           <span class="label">Mask engine <small class="muted">(mask mode only)</small></span>
           <select id="mask-engine">
-            <option value="flux_ref_inpaint" selected>FLUX inpaint + reference (default — best mask compliance + polygon-honoring)</option>
-            <option value="gemini_crop">Gemini crop+edit (fastest; high fidelity)</option>
-            <option value="anydoor_chain">AnyDoor → gpt_fal refinement (slower; backup for unusual placements)</option>
+            <option value="gemini_translucent" selected>Gemini translucent pre-paste (default — best fidelity + polygon-honoring)</option>
+            <option value="flux_ref_inpaint">FLUX inpaint + reference (best mask compliance, weaker fence rendering)</option>
+            <option value="gemini_crop">Gemini crop+edit (fast)</option>
+            <option value="anydoor_chain">AnyDoor → gpt_fal refinement (slower; backup)</option>
             <option value="gpt_fal">gpt-image-1 via fal.ai alone (ignores polygon outside semantic prior)</option>
             <option value="anydoor">AnyDoor via Replicate alone (strict polygon, lower fidelity)</option>
             <option value="openai">OpenAI gpt-image-1 direct (needs OpenAI billing)</option>

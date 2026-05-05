@@ -74,13 +74,14 @@ from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
 MaskEngine = Literal[
-    "flux_ref_inpaint",  # default — fal flux-general/inpainting with native reference_image_url
-    "gemini_crop",       # crop polygon bbox+pad → Nano Banana edit → feathered reassemble
-    "anydoor_chain",     # AnyDoor placement + gpt-image-1 refinement
-    "gpt_fal",           # gpt-image-1 alone (ignores polygon outside semantic prior)
-    "anydoor",           # AnyDoor alone
-    "openai",            # OpenAI direct
-    "flux_prepaste",     # FLUX prepaste fallback
+    "gemini_translucent", # default — pre-paste reference at 55% alpha → Nano Banana Pro
+    "flux_ref_inpaint",   # fal flux-general/inpainting with native reference_image_url
+    "gemini_crop",        # crop polygon bbox+pad → Nano Banana edit → feathered reassemble
+    "anydoor_chain",      # AnyDoor placement + gpt-image-1 refinement
+    "gpt_fal",            # gpt-image-1 alone (ignores polygon outside semantic prior)
+    "anydoor",            # AnyDoor alone
+    "openai",             # OpenAI direct
+    "flux_prepaste",      # FLUX prepaste fallback
 ]
 AuxKind = Literal["mask", "previous"]
 
@@ -235,6 +236,86 @@ def _rasterize_polygon(
 
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _build_translucent_prepaste(
+    scene_bytes: bytes,
+    reference_bytes: bytes,
+    polygon_norm: list[tuple[float, float]],
+    *,
+    alpha: float = 0.55,
+    reference_crop: tuple[float, float] | None = None,
+) -> bytes:
+    """Pre-paste the reference into the polygon at fractional alpha.
+
+    Empirically (May 2026 sweep at docs/results/26-translucent-*) this
+    is the strongest input for Gemini-family models on hard polygons:
+
+    - At ``alpha=0.20-0.35``: the reference is too faint, so Gemini
+      ignores the polygon and relocates the object to its semantic
+      prior location.
+    - At ``alpha=0.55``: the reference is clearly visible at the
+      polygon location (giving Gemini a strong spatial cue) but
+      faded enough that Gemini understands it should *re-render*
+      rather than copy-paste. The model produces a crisp object
+      inside the polygon and leaves the rest of the scene alone.
+    - At ``alpha=0.75-0.95``: the reference looks "correct enough" that
+      Gemini decides to extend the same style globally, replacing
+      other instances of the object class throughout the scene.
+
+    The single output image carries three signals at once:
+    *where* (the visible reference at the polygon), *what* (the
+    reference identity at low opacity), and *what to preserve* (the
+    scene visible everywhere else). This is why it works where pure
+    binary masks and pure colored markers don't.
+    """
+    if len(polygon_norm) < 3:
+        raise ValueError(f"Polygon needs at least 3 vertices, got {len(polygon_norm)}.")
+    alpha = max(0.0, min(1.0, alpha))
+
+    with Image.open(io.BytesIO(scene_bytes)) as raw:
+        scene = raw.convert("RGB")
+    with Image.open(io.BytesIO(reference_bytes)) as raw_ref:
+        ref = raw_ref.convert("RGB")
+
+    if reference_crop:
+        top, bot = reference_crop
+        rH = ref.height
+        ref = ref.crop((0, int(top * rH), ref.width, int(bot * rH)))
+
+    W, H = scene.size
+    pixel_pts = _polygon_to_pixels(polygon_norm, W, H)
+    xs = [p[0] for p in pixel_pts]
+    ys = [p[1] for p in pixel_pts]
+    bx0, by0, bx1, by1 = min(xs), min(ys), max(xs), max(ys)
+    bw, bh = max(1, bx1 - bx0), max(1, by1 - by0)
+
+    # Cover-fit the reference to the polygon's bounding box.
+    rW, rH = ref.size
+    sf = max(bw / rW, bh / rH)
+    nW, nH = max(1, round(rW * sf)), max(1, round(rH * sf))
+    ref_resized = ref.resize((nW, nH), Image.LANCZOS)
+    cx, cy = (nW - bw) // 2, (nH - bh) // 2
+    ref_for_paste = ref_resized.crop((cx, cy, cx + bw, cy + bh))
+
+    # Build a polygon-shaped overlay containing the resized reference.
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    overlay.paste(ref_for_paste, (bx0, by0))
+    poly_mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(poly_mask).polygon(pixel_pts, fill=255)
+    clipped = Image.composite(overlay, Image.new("RGBA", (W, H), (0, 0, 0, 0)), poly_mask)
+
+    # Multiply the alpha channel by the desired fraction.
+    a_band = clipped.split()[3]
+    a_band = a_band.point(lambda x, frac=alpha: int(x * frac))
+    clipped.putalpha(a_band)
+
+    base = scene.convert("RGBA")
+    result = Image.alpha_composite(base, clipped).convert("RGB")
+
+    buf = io.BytesIO()
+    result.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -465,7 +546,9 @@ async def insert_object(
     inpaint_steps: int = 40,
     inpaint_strength: float = 0.45,
     reference_crop: tuple[float, float] | None = None,
-    mask_engine: MaskEngine = "flux_ref_inpaint",
+    mask_engine: MaskEngine = "gemini_translucent",
+    translucent_alpha: float = 0.55,
+    translucent_model: str | None = None,
     flux_ref_strength: float = 0.65,
     flux_ref_steps: int = 50,
     flux_ref_guidance: float = 5.0,
@@ -590,7 +673,38 @@ async def insert_object(
             clipped.save(buf, format="PNG")
             return buf.getvalue()
 
-        if mask_engine == "flux_ref_inpaint":
+        if mask_engine == "gemini_translucent":
+            # New empirical winner from the May 2026 wide sweep
+            # (docs/results/26-translucent-*). Pre-paste the reference
+            # into the polygon at 55% alpha — visible enough to give
+            # Gemini a strong spatial cue, faded enough that the
+            # model re-renders rather than copy-pastes. Single image
+            # carries marker + identity + scene context together.
+            prepasted_bytes = _build_translucent_prepaste(
+                scene_bytes,
+                reference_bytes,
+                mask_polygon,
+                alpha=translucent_alpha,
+                reference_crop=reference_crop,
+            )
+            fal = falai or FalAI()
+            simple_prompt = (
+                f"{instruction}. Place the object from image 2 into the "
+                "highlighted region in image 1. Re-render it cleanly so the "
+                "transparency disappears; match the scene's perspective and "
+                "lighting; preserve everything else in the scene."
+            )
+            edit_resp = await fal.nano_banana.edit(
+                scene=(prepasted_bytes, "image/png"),
+                references=[(reference_bytes, reference_mime)],
+                prompt=simple_prompt,
+                model=translucent_model,
+            )
+            raw_bytes = _maybe_post_clip(edit_resp.image_bytes)
+            raw_mime = "image/png"
+            edit_text = ""
+
+        elif mask_engine == "flux_ref_inpaint":
             # The single hosted endpoint that takes scene + mask +
             # reference + prompt as four native input fields. FLUX
             # treats the mask as a hard alpha constraint at the
