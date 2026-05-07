@@ -83,15 +83,9 @@
         <label class="field">
           <span class="label">Mask engine <small class="muted">(mask mode only)</small></span>
           <select id="mask-engine">
-            <option value="gpt_image_2" selected>gpt-image-2 via fal.ai (default — Apr 2026 model, strongest instruction-following)</option>
-            <option value="gemini_translucent">Gemini translucent pre-paste (variance-prone but cheaper)</option>
-            <option value="flux_ref_inpaint">FLUX inpaint + reference (lowest mask drift, weaker rendering)</option>
-            <option value="gemini_crop">Gemini crop+edit (fast)</option>
-            <option value="anydoor_chain">AnyDoor → gpt_fal refinement (slower; backup)</option>
-            <option value="gpt_fal">gpt-image-1 via fal.ai alone</option>
-            <option value="anydoor">AnyDoor via Replicate alone (strict polygon, lower fidelity)</option>
-            <option value="openai">OpenAI gpt-image-1 direct (needs OpenAI billing)</option>
-            <option value="flux_prepaste">FLUX prepaste fallback</option>
+            <option value="gpt_image_2" selected>gpt-image-2 (default — best balance of placement, fidelity, and scene preservation)</option>
+            <option value="flux_ref_inpaint">FLUX inpaint + reference (alternative — strict mask, lower fidelity)</option>
+            <option value="anydoor">AnyDoor (alternative — Replicate-hosted, strict polygon)</option>
           </select>
         </label>
         <label class="field">

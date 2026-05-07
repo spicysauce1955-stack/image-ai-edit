@@ -558,7 +558,7 @@ async def insert_object(
     gemini_crop_model: str | None = None,
     openai_quality: str = "high",
     openai: OpenAI | None = None,
-    post_clip_to_mask: bool = False,
+    post_clip_to_mask: bool = True,
 ) -> InsertResult:
     """Run the insertion pipeline end-to-end.
 
@@ -648,15 +648,28 @@ async def insert_object(
 
         template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
 
-        # Optional post-clip helper. When enabled, composites the
-        # model's output back onto the original scene through our
-        # binary polygon mask, guaranteeing 100% pixel equality
-        # outside the polygon. Disabled by default so callers see the
-        # model's raw output and can decide whether the polygon
-        # boundary should be enforced post-hoc — diffusion-style
-        # clipping is a heavy hammer that hides interesting model
-        # behaviour (e.g. shadows that *should* extend past the
-        # polygon onto the ground).
+        # Post-clip with dilated + Gaussian-feathered polygon.
+        #
+        # Why dilated + feathered, not hard binary:
+        #   - Hard clip at the polygon edge produces visible seams
+        #     when the model's edit slightly bleeds past the polygon
+        #     (shadows, ground-line transitions). Looks like a sticker
+        #     was pasted onto the scene.
+        #   - Dilated mask + Gaussian feather lets shadows and
+        #     ground-line transitions extend a few pixels past the
+        #     polygon naturally, then smoothly blends back to the
+        #     original. The seam is invisible.
+        #   - Inside the dilated region the model's output wins;
+        #     outside it the original scene wins; the transition
+        #     band is a smooth alpha blend.
+        #
+        # On variant-B (lawn polygon, P1 back-wall test), this
+        # eliminates the "phantom flower bed" / "sky tone shift" /
+        # "lawn texture re-render" artifacts that gpt-image-2
+        # otherwise scatters across the scene, while preserving its
+        # excellent inside-polygon rendering.
+        from PIL import ImageFilter
+
         def _maybe_post_clip(model_output: bytes) -> bytes:
             if not post_clip_to_mask:
                 return model_output
@@ -666,13 +679,20 @@ async def insert_object(
                 scene_img = raw_scene.convert("RGB")
             if edited.size != scene_img.size:
                 edited = edited.resize(scene_img.size, Image.LANCZOS)
-            poly_mask = Image.new("L", scene_img.size, 0)
+            W_, H_ = scene_img.size
+            # Dilate by ~2% of the smaller scene dim — enough for
+            # shadow extensions to feel natural, small enough to
+            # still feel "inside the polygon" to the user.
+            dilate = max(4, min(W_, H_) // 50)
+            poly_mask = Image.new("L", (W_, H_), 0)
             ImageDraw.Draw(poly_mask).polygon(
-                _polygon_to_pixels(mask_polygon, *scene_img.size), fill=255
+                _polygon_to_pixels(mask_polygon, W_, H_), fill=255
             )
-            clipped = Image.composite(edited, scene_img, poly_mask)
+            poly_mask = poly_mask.filter(ImageFilter.MaxFilter(2 * dilate + 1))
+            poly_mask = poly_mask.filter(ImageFilter.GaussianBlur(radius=dilate))
+            blended = Image.composite(edited, scene_img, poly_mask)
             buf = io.BytesIO()
-            clipped.save(buf, format="PNG")
+            blended.save(buf, format="PNG")
             return buf.getvalue()
 
         if mask_engine == "gpt_image_2":
