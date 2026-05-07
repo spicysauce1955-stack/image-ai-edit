@@ -106,6 +106,7 @@ def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
 
 VALID_MODES: set[str] = {"free", "mask"}
 VALID_MASK_ENGINES: set[str] = {
+    "gpt_image_2",
     "gemini_translucent",
     "flux_ref_inpaint",
     "gemini_crop",
@@ -152,7 +153,7 @@ def create_app() -> FastAPI:
         segment: str = Form(""),
         relight: str = Form(""),
         reference_crop: str = Form(""),
-        mask_engine: str = Form("gemini_translucent"),
+        mask_engine: str = Form("gpt_image_2"),
         previous: UploadFile | None = File(None),
     ) -> dict[str, str | None]:
         """Run the insertion pipeline.

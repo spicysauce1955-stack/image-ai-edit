@@ -74,7 +74,8 @@ from ..providers import FalAI, Gemini, OpenAI, Replicate
 
 Mode = Literal["free", "mask"]
 MaskEngine = Literal[
-    "gemini_translucent", # default — pre-paste reference at 55% alpha → Nano Banana Pro
+    "gpt_image_2",        # default — OpenAI's April 2026 model; instruction-following solves semantic prior
+    "gemini_translucent", # pre-paste reference at 55% alpha → Nano Banana Pro
     "flux_ref_inpaint",   # fal flux-general/inpainting with native reference_image_url
     "gemini_crop",        # crop polygon bbox+pad → Nano Banana edit → feathered reassemble
     "anydoor_chain",      # AnyDoor placement + gpt-image-1 refinement
@@ -546,7 +547,8 @@ async def insert_object(
     inpaint_steps: int = 40,
     inpaint_strength: float = 0.45,
     reference_crop: tuple[float, float] | None = None,
-    mask_engine: MaskEngine = "gemini_translucent",
+    mask_engine: MaskEngine = "gpt_image_2",
+    gpt_image_2_quality: str = "high",
     translucent_alpha: float = 0.55,
     translucent_model: str | None = None,
     flux_ref_strength: float = 0.65,
@@ -673,7 +675,31 @@ async def insert_object(
             clipped.save(buf, format="PNG")
             return buf.getvalue()
 
-        if mask_engine == "gemini_translucent":
+        if mask_engine == "gpt_image_2":
+            # OpenAI's gpt-image-2 (released April 21, 2026) hosted on
+            # fal at openai/gpt-image-2/edit. Headline upgrade vs
+            # gpt-image-1: "stronger instruction following" — which
+            # empirically does fix the semantic-prior trap. On
+            # variant-B (the lawn polygon where every prior gpt-image
+            # variant relocated the fence to the back wall),
+            # gpt-image-2 places the fence inside the polygon
+            # cleanly with vertical slats + posts + scene preserved.
+            # Slow (~200s at quality=high) but architecturally the
+            # correct primitive.
+            fal = falai or FalAI()
+            edit_resp = await fal.gpt_image_2.edit(
+                scene=(scene_bytes, scene_mime),
+                mask=(aux_bytes, "image/png"),
+                references=[(reference_bytes, reference_mime)],
+                prompt=f"{instruction}. {template}",
+                quality=gpt_image_2_quality,
+                image_size="auto",
+            )
+            raw_bytes = _maybe_post_clip(edit_resp.image_bytes)
+            raw_mime = "image/png"
+            edit_text = ""
+
+        elif mask_engine == "gemini_translucent":
             # New empirical winner from the May 2026 wide sweep
             # (docs/results/26-translucent-*). Pre-paste the reference
             # into the polygon at 55% alpha — visible enough to give

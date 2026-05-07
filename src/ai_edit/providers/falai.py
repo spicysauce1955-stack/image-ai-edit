@@ -47,6 +47,7 @@ DEFAULT_INPAINT_MODEL = "fal-ai/flux-kontext-lora/inpaint"
 DEFAULT_GPTIMAGE_MODEL = "fal-ai/gpt-image-1/edit-image"
 DEFAULT_NANO_BANANA_MODEL = "fal-ai/nano-banana-pro/edit"
 DEFAULT_FLUX_REF_INPAINT_MODEL = "fal-ai/flux-general/inpainting"
+DEFAULT_GPT_IMAGE_2_MODEL = "openai/gpt-image-2/edit"
 POLL_INTERVAL_S = 2.0
 POLL_TIMEOUT_S = 600.0
 
@@ -361,6 +362,85 @@ class FalAIGPTImage:
         )
 
 
+class FalAIGPTImage2:
+    """OpenAI gpt-image-2 (released April 21, 2026) hosted on fal.
+
+    fal endpoint: ``openai/gpt-image-2/edit`` — proxies the model
+    against ``FAL_KEY`` so we don't need OpenAI billing unlocked.
+
+    Why it's the breakthrough we've been waiting for:
+
+    OpenAI explicitly improved gpt-image-2's instruction following
+    over gpt-image-1: "stronger editing, better layouts, improved
+    text rendering, more reliable instruction-following" (OpenAI's
+    own release post). The "more reliable instruction-following" is
+    the architectural fix for the semantic-prior trap that made
+    every prior gpt-image-1 / Nano Banana call relocate inserted
+    objects to "where they normally belong" in the scene.
+
+    Native fields (per fal docs):
+
+    - ``image_urls``     : list[str] — scene + reference (scene first)
+    - ``mask_url``       : str       — PNG mask, white = inpaint region
+    - ``prompt``         : str
+    - ``quality``        : "auto"|"low"|"medium"|"high" (default "high")
+    - ``image_size``     : "auto" or specific dims
+
+    Latency: ~200 s at quality=high (the model "thinks" before rendering).
+    Cost: ~$0.08–0.20 per call depending on quality/size.
+    """
+
+    def __init__(self, provider: FalAI) -> None:
+        self._provider = provider
+
+    async def edit(
+        self,
+        scene: tuple[bytes, str],
+        mask: tuple[bytes, str],
+        references: list[tuple[bytes, str]],
+        prompt: str,
+        *,
+        model: str | None = None,
+        quality: str = "high",
+        image_size: str = "auto",
+        **kwargs: Any,
+    ) -> EditResponse:
+        """Mask-bound, reference-conditioned edit via gpt-image-2 on fal."""
+        import fal_client
+        import os
+
+        os.environ.setdefault("FAL_KEY", self._provider.api_key)
+
+        sb, sm = scene
+        mb, mm = mask
+
+        image_uris = [_data_uri(sb, sm)]
+        for rb, rm in references:
+            image_uris.append(_data_uri(rb, rm))
+
+        arguments: dict[str, Any] = {
+            "prompt": prompt,
+            "image_urls": image_uris,
+            "mask_url": _data_uri(mb, mm),
+            "quality": quality,
+            "image_size": image_size,
+        }
+        arguments.update(kwargs)
+
+        result = await asyncio.to_thread(
+            fal_client.subscribe,
+            model or DEFAULT_GPT_IMAGE_2_MODEL,
+            arguments=arguments,
+            with_logs=False,
+        )
+        url = _first_image_url(result)
+        return EditResponse(
+            image_bytes=await _download(url),
+            mime_type="image/png",
+            raw=result,
+        )
+
+
 class FalAIFluxRefInpaint:
     """fal-ai/flux-general/inpainting with native reference conditioning.
 
@@ -504,6 +584,7 @@ class FalAI(BaseProvider):
         self.relight = FalAIRelight(self)
         self.inpaint = FalAIInpaintRef(self)
         self.gpt_image = FalAIGPTImage(self)
+        self.gpt_image_2 = FalAIGPTImage2(self)
         self.nano_banana = FalAINanoBanana(self)
         self.flux_ref_inpaint = FalAIFluxRefInpaint(self)
 
