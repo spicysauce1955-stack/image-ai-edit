@@ -402,11 +402,15 @@ def _warp_reference_to_quad(
     return Image.composite(warped, transparent, poly_mask)
 
 
-# Marker colour for the overlay mode. Magenta (255, 0, 220) — chosen
-# because it almost never naturally occurs in outdoor scenes, so the
-# model unambiguously recognises it as an annotation rather than a
-# scene element to preserve.
-_OVERLAY_MARKER_RGB = (255, 0, 220)
+# Placeholder colours for the overlay mode. Neutral greys — chosen
+# specifically because they carry no identity information for the
+# model to copy. The placeholder communicates "fence shape goes
+# here" via geometry alone (post rectangles + section panels);
+# colour, texture, and slat detail come from the reference image
+# the model sees as image 2.
+_PLACEHOLDER_PANEL_RGB = (170, 170, 170)   # mid-grey panel fill
+_PLACEHOLDER_POST_RGB  = (90, 90, 90)      # darker grey post fill
+_PLACEHOLDER_OUTLINE_RGB = (50, 50, 50)    # near-black outline
 
 
 def _build_poles_overlay(
@@ -418,23 +422,26 @@ def _build_poles_overlay(
     post_width_norm: float = 0.012,
     alpha: float = 0.55,
 ) -> bytes:
-    """Draw a fence-shaped colored marker on a copy of the scene.
+    """Draw an abstract fence-shaped placeholder on a copy of the scene.
 
-    The marker is the union of:
-      - section parallelograms between consecutive poles
-      - post columns at each pole
+    The placeholder is the union of:
+      - section panels (parallelograms between consecutive poles), in
+        translucent neutral grey
+      - post columns at each pole, in slightly darker grey
+      - thin near-black outlines around each piece, for clarity
 
-    Filled in translucent magenta with a solid magenta outline. The
-    reference fence image is NOT pre-pasted here — it goes to the
-    model as a separate image. The marker tells the model *where*
-    the fence should appear; the reference tells it *what* the fence
-    looks like.
+    The placeholder is intentionally *abstract*: solid neutral greys
+    with no slats, no texture, no colour identity — so the model
+    understands "fence-shaped object goes here" via geometry alone
+    but has nothing specific in the placeholder to copy. Identity
+    (slat pattern, vinyl colour, post style) comes entirely from the
+    reference image, which is sent unchanged as a separate input.
 
-    ``alpha`` controls the marker's translucency (0.0 = invisible,
-    1.0 = solid). 0.55 is a good default: visible enough that the
-    model picks up the placement intent, transparent enough that
-    underlying scene context (lawn texture, lighting cues) still
-    informs the render.
+    ``alpha`` controls the placeholder's translucency (0.0 = invisible
+    geometry, 1.0 = solid grey blocking the scene). 0.55 is a good
+    default: visible enough that the model picks up the placement
+    intent, transparent enough that underlying scene context (lawn
+    texture, lighting cues, ground line) still informs the render.
 
     Per-pole section length caps work the same way as in
     :func:`_build_poles_mask`.
@@ -456,17 +463,24 @@ def _build_poles_overlay(
         for u, v in poles
     ]
 
-    fill_alpha = max(0, min(255, int(alpha * 255)))
-    fill_rgba = (*_OVERLAY_MARKER_RGB, fill_alpha)
-    line_rgba = (*_OVERLAY_MARKER_RGB, 255)
-    line_w = max(2, min(W, H) // 200)
+    panel_alpha = max(0, min(255, int(alpha * 255)))
+    # Posts get a slightly stronger alpha than panels so the post
+    # silhouette is unambiguous in the placeholder (real fences look
+    # like alternating solid/lattice — we mimic that visual cue).
+    post_alpha = max(0, min(255, int(min(1.0, alpha + 0.20) * 255)))
+    line_alpha = max(0, min(255, int(min(1.0, alpha + 0.10) * 255)))
+
+    panel_rgba = (*_PLACEHOLDER_PANEL_RGB, panel_alpha)
+    post_rgba = (*_PLACEHOLDER_POST_RGB, post_alpha)
+    line_rgba = (*_PLACEHOLDER_OUTLINE_RGB, line_alpha)
+    line_w = max(2, min(W, H) // 250)
 
     fill_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     line_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     fdraw = ImageDraw.Draw(fill_layer)
     ldraw = ImageDraw.Draw(line_layer)
 
-    # Section parallelograms.
+    # Section panels — neutral grey, no internal detail.
     for i in range(len(pole_px) - 1):
         p1 = pole_px[i]
         p2 = pole_px[i + 1]
@@ -493,17 +507,20 @@ def _build_poles_overlay(
             (p2[0], max(0, p2[1] - section_height_px)),
             (p1[0], max(0, p1[1] - section_height_px)),
         ]
-        fdraw.polygon(quad, fill=fill_rgba)
+        fdraw.polygon(quad, fill=panel_rgba)
         ldraw.polygon(quad, outline=line_rgba, width=line_w)
 
-    # Post columns at each pole (rendered solid for visibility).
+    # Post columns at each pole — darker grey, drawn over the panels
+    # so post silhouettes read as the structural elements.
     half_post = post_width_px // 2
     for px, py in pole_px:
+        top = max(0, py - section_height_px)
         rect = [
-            (max(0, px - half_post), max(0, py - section_height_px)),
+            (max(0, px - half_post), top),
             (min(W - 1, px + half_post), py),
         ]
-        fdraw.rectangle(rect, fill=line_rgba)
+        fdraw.rectangle(rect, fill=post_rgba)
+        ldraw.rectangle(rect, outline=line_rgba, width=line_w)
 
     composite = Image.alpha_composite(
         Image.alpha_composite(scene, fill_layer), line_layer
@@ -945,12 +962,14 @@ async def insert_object(
 
         if mode == "overlay":
             if not poles:
-                raise ValueError("overlay mode requires poles (marker uses pole geometry).")
-            # Draw a translucent magenta marker outlining the fence
-            # shape (post columns + section quads) onto a copy of
-            # the scene. The reference is NOT pre-pasted here —
-            # it goes to the model as a separate image; the marker
-            # only tells the model WHERE the fence should appear.
+                raise ValueError("overlay mode requires poles (placeholder uses pole geometry).")
+            # Draw an abstract grey fence-shaped PLACEHOLDER on the
+            # scene — visible post columns + section panels in
+            # neutral grey at translucent alpha. No slats, no colour
+            # identity, no texture. The reference image goes to the
+            # model unchanged as image 2; the placeholder only tells
+            # the model WHERE the fence should appear, via geometry
+            # alone, with nothing for the model to copy from.
             overlay_scene_bytes = _build_poles_overlay(
                 scene_bytes,
                 poles,
