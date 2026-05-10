@@ -402,54 +402,52 @@ def _warp_reference_to_quad(
     return Image.composite(warped, transparent, poly_mask)
 
 
+# Marker colour for the overlay mode. Magenta (255, 0, 220) — chosen
+# because it almost never naturally occurs in outdoor scenes, so the
+# model unambiguously recognises it as an annotation rather than a
+# scene element to preserve.
+_OVERLAY_MARKER_RGB = (255, 0, 220)
+
+
 def _build_poles_overlay(
     scene_bytes: bytes,
-    reference_bytes: bytes,
     poles: list[tuple[float, float]],
     *,
     section_height_norm: float = 0.18,
     pole_section_lengths: list[float | None] | None = None,
+    post_width_norm: float = 0.012,
     alpha: float = 0.55,
-    reference_crop: tuple[float, float] | None = None,
 ) -> bytes:
-    """Pre-paste warped reference fence sections onto the scene.
+    """Draw a fence-shaped colored marker on a copy of the scene.
 
-    For each consecutive pair of poles, perspective-warp the reference
-    image into the section parallelogram and composite onto a copy of
-    the scene at fractional ``alpha``. The result is a single image
-    where the user's intended fence is visibly previewed in the
-    correct positions, perspectives, and angles — but at low opacity
-    so a downstream model (Nano Banana / gpt_image_2) re-renders
-    cleanly rather than copy-pasting the warped texture.
+    The marker is the union of:
+      - section parallelograms between consecutive poles
+      - post columns at each pole
 
-    Empirically (see docs/results/26-translucent-* for the polygon
-    version) ``alpha=0.55`` is the goldilocks zone:
+    Filled in translucent magenta with a solid magenta outline. The
+    reference fence image is NOT pre-pasted here — it goes to the
+    model as a separate image. The marker tells the model *where*
+    the fence should appear; the reference tells it *what* the fence
+    looks like.
 
-      - Below ~0.3: model can't see the placement clearly, falls back
-        to semantic prior.
-      - 0.5–0.6: clear placement cue, model re-renders cleanly.
-      - Above ~0.75: model copy-pastes the warped (low-fidelity) texture.
+    ``alpha`` controls the marker's translucency (0.0 = invisible,
+    1.0 = solid). 0.55 is a good default: visible enough that the
+    model picks up the placement intent, transparent enough that
+    underlying scene context (lawn texture, lighting cues) still
+    informs the render.
 
-    Per-pole section length caps work the same as in
-    :func:`_build_poles_mask` — the section between two poles uses
-    the smaller of the two endpoints' max lengths and truncates if
-    the actual click distance exceeds the cap.
+    Per-pole section length caps work the same way as in
+    :func:`_build_poles_mask`.
     """
     if len(poles) < 2:
         raise ValueError(f"Need at least 2 poles, got {len(poles)}.")
 
     with Image.open(io.BytesIO(scene_bytes)) as raw_scene:
-        scene = raw_scene.convert("RGB")
-    with Image.open(io.BytesIO(reference_bytes)) as raw_ref:
-        ref = raw_ref.convert("RGB")
-
-    if reference_crop:
-        top, bot = reference_crop
-        rH = ref.height
-        ref = ref.crop((0, int(top * rH), ref.width, int(bot * rH)))
+        scene = raw_scene.convert("RGBA")
 
     W, H = scene.size
     section_height_px = max(4, int(section_height_norm * H))
+    post_width_px = max(2, int(post_width_norm * W))
     pole_px = [
         (
             max(0, min(W - 1, round(u * W))),
@@ -458,9 +456,17 @@ def _build_poles_overlay(
         for u, v in poles
     ]
 
-    base = scene.convert("RGBA")
-    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    fill_alpha = max(0, min(255, int(alpha * 255)))
+    fill_rgba = (*_OVERLAY_MARKER_RGB, fill_alpha)
+    line_rgba = (*_OVERLAY_MARKER_RGB, 255)
+    line_w = max(2, min(W, H) // 200)
 
+    fill_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    line_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    fdraw = ImageDraw.Draw(fill_layer)
+    ldraw = ImageDraw.Draw(line_layer)
+
+    # Section parallelograms.
     for i in range(len(pole_px) - 1):
         p1 = pole_px[i]
         p2 = pole_px[i + 1]
@@ -478,28 +484,33 @@ def _build_poles_overlay(
                 ratio = cap_px / d
                 p2 = (round(p1[0] + dx * ratio), round(p1[1] + dy * ratio))
 
-        # Section parallelogram in OUTPUT pixel space (bl, br, tr, tl).
+        if abs(p2[0] - p1[0]) + abs(p2[1] - p1[1]) < 2:
+            continue
+
         quad = [
             (p1[0], p1[1]),
             (p2[0], p2[1]),
             (p2[0], max(0, p2[1] - section_height_px)),
             (p1[0], max(0, p1[1] - section_height_px)),
         ]
-        # Skip degenerate sections (zero-area).
-        if abs(p2[0] - p1[0]) + abs(p2[1] - p1[1]) < 2:
-            continue
+        fdraw.polygon(quad, fill=fill_rgba)
+        ldraw.polygon(quad, outline=line_rgba, width=line_w)
 
-        warped = _warp_reference_to_quad(ref, quad, (W, H))
-        overlay = Image.alpha_composite(overlay, warped)
+    # Post columns at each pole (rendered solid for visibility).
+    half_post = post_width_px // 2
+    for px, py in pole_px:
+        rect = [
+            (max(0, px - half_post), max(0, py - section_height_px)),
+            (min(W - 1, px + half_post), py),
+        ]
+        fdraw.rectangle(rect, fill=line_rgba)
 
-    if alpha < 1.0:
-        a_band = overlay.split()[3]
-        a_band = a_band.point(lambda x, frac=alpha: int(x * frac))
-        overlay.putalpha(a_band)
-
-    result = Image.alpha_composite(base, overlay).convert("RGB")
+    composite = Image.alpha_composite(
+        Image.alpha_composite(scene, fill_layer), line_layer
+    )
+    out = composite.convert("RGB")
     buf = io.BytesIO()
-    result.save(buf, format="PNG")
+    out.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -934,19 +945,20 @@ async def insert_object(
 
         if mode == "overlay":
             if not poles:
-                raise ValueError("overlay mode requires poles (perspective warp uses pole geometry).")
+                raise ValueError("overlay mode requires poles (marker uses pole geometry).")
+            # Draw a translucent magenta marker outlining the fence
+            # shape (post columns + section quads) onto a copy of
+            # the scene. The reference is NOT pre-pasted here —
+            # it goes to the model as a separate image; the marker
+            # only tells the model WHERE the fence should appear.
             overlay_scene_bytes = _build_poles_overlay(
                 scene_bytes,
-                reference_bytes,
                 poles,
                 section_height_norm=pole_section_height,
                 pole_section_lengths=pole_section_lengths,
+                post_width_norm=pole_post_width,
                 alpha=overlay_alpha,
-                reference_crop=reference_crop,
             )
-            # Aux preview shows the overlay (what the model saw); the
-            # original scene is still used for the post-clip pass so
-            # pixels outside the polygon are guaranteed identical.
             aux_bytes = overlay_scene_bytes
             aux_kind = "overlay"
             engine_scene_bytes = overlay_scene_bytes
