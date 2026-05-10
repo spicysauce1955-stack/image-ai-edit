@@ -22,8 +22,8 @@
         <div class="block-header">
           <span class="label">Scene</span>
           <span class="actions" hidden>
-            <button type="button" class="ghost" id="clear-poly" title="Remove all polygon points">Clear region</button>
-            <button type="button" class="ghost" id="undo-poly" title="Remove the last polygon point">Undo</button>
+            <button type="button" class="ghost" id="clear-poly" title="Remove all poles">Clear poles</button>
+            <button type="button" class="ghost" id="undo-poly" title="Remove the last pole">Undo</button>
             <button type="button" class="ghost" id="replace-scene" title="Choose a different scene">Replace</button>
           </span>
         </div>
@@ -35,7 +35,15 @@
           </span>
           <input type="file" name="scene" accept="image/*" />
         </div>
-        <p id="poly-hint" class="muted small" hidden>Click on the scene to add polygon vertices. Need ≥3 to define a region.</p>
+        <p id="poly-hint" class="muted small" hidden>Click on the scene to place fence poles at the BASE of where each post should stand. Sections auto-generate between consecutive poles. Need ≥2 poles.</p>
+        <div id="pole-controls" class="pole-controls" hidden>
+          <label class="field" style="margin: 0.4rem 0 0 0;">
+            <span class="label small">Section height
+              <small class="muted" id="section-height-display">18%</small>
+            </span>
+            <input type="range" id="section-height" min="5" max="40" value="18" step="1" />
+          </label>
+        </div>
       </div>
 
       <!-- Reference block -->

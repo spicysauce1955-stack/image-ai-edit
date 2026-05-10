@@ -123,26 +123,40 @@ main {
   width: 100%; height: auto; display: block;
 }
 
-/* SVG overlay for polygon drawing — sits on top of scene-img. */
+/* SVG overlay for pole-based fence builder — sits on top of scene-img. */
 .scene-drop .poly-overlay {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
   pointer-events: none;
 }
-.scene-drop .poly-overlay polygon,
-.scene-drop .poly-overlay polyline {
-  fill: color-mix(in srgb, var(--accent) 25%, transparent);
+/* Auto-generated section parallelograms between consecutive poles. */
+.scene-drop .poly-overlay polygon.section-quad {
+  fill: color-mix(in srgb, var(--accent) 22%, transparent);
   stroke: var(--accent);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
 }
-.scene-drop .poly-overlay polyline { fill: none; stroke-dasharray: 4 4; }
-.scene-drop .poly-overlay circle {
+/* Solid post column at each pole (taller-than-section accent rectangle). */
+.scene-drop .poly-overlay rect.post-col {
+  fill: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+/* Pole base marker (small circle at the click position). */
+.scene-drop .poly-overlay circle.pole-base {
   fill: white;
   stroke: var(--accent);
-  stroke-width: 2;
+  stroke-width: 3;
   vector-effect: non-scaling-stroke;
 }
+/* Pole index labels (1, 2, 3, ...). */
+.scene-drop .poly-overlay text.pole-label {
+  fill: var(--accent);
+  font-weight: 700;
+  paint-order: stroke;
+  stroke: white;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+.pole-controls input[type=range] { width: 100%; accent-color: var(--accent); }
 
 /* Reference image fills its drop. */
 .ref-drop img.ref-img {

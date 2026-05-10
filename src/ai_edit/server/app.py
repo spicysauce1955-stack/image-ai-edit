@@ -72,11 +72,11 @@ def _cache_put(result: _CachedResult) -> str:
     return token
 
 
-def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
-    """Parse ``polygon`` form field. Empty → None.
+def _parse_uv_list(raw: str, *, min_count: int, label: str) -> list[tuple[float, float]] | None:
+    """Parse a JSON list of ``[u, v]`` pairs in ``[0, 1]``.
 
-    Raises 400 with a clear message on bad payloads so the UI can
-    surface them inline.
+    Used by both ``polygon`` (legacy) and ``poles`` form fields.
+    Empty string returns None (caller decides if that's acceptable).
     """
     raw = raw.strip()
     if not raw:
@@ -84,24 +84,32 @@ def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid polygon JSON: {exc}")
-    if not isinstance(parsed, list) or len(parsed) < 3:
+        raise HTTPException(status_code=400, detail=f"Invalid {label} JSON: {exc}")
+    if not isinstance(parsed, list) or len(parsed) < min_count:
         raise HTTPException(
             status_code=400,
-            detail="polygon must be a JSON list of at least 3 [u, v] pairs.",
+            detail=f"{label} must be a JSON list of at least {min_count} [u, v] pairs.",
         )
     points: list[tuple[float, float]] = []
     for p in parsed:
         if not (isinstance(p, (list, tuple)) and len(p) == 2):
-            raise HTTPException(status_code=400, detail=f"Bad polygon vertex: {p!r}")
+            raise HTTPException(status_code=400, detail=f"Bad {label} vertex: {p!r}")
         u, v = float(p[0]), float(p[1])
         if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
             raise HTTPException(
                 status_code=400,
-                detail=f"Polygon vertices must be normalized to [0, 1]: got {p!r}",
+                detail=f"{label} vertices must be normalized to [0, 1]: got {p!r}",
             )
         points.append((u, v))
     return points
+
+
+def _parse_polygon(raw: str) -> list[tuple[float, float]] | None:
+    return _parse_uv_list(raw, min_count=3, label="polygon")
+
+
+def _parse_poles(raw: str) -> list[tuple[float, float]] | None:
+    return _parse_uv_list(raw, min_count=2, label="poles")
 
 
 VALID_MODES: set[str] = {"free", "mask"}
@@ -149,6 +157,8 @@ def create_app() -> FastAPI:
         instruction: str = Form(...),
         mode: str = Form("free"),
         polygon: str = Form(""),
+        poles: str = Form(""),
+        pole_section_height: float = Form(0.18),
         system_prompt: str = Form(""),
         segment: str = Form(""),
         relight: str = Form(""),
@@ -172,9 +182,11 @@ def create_app() -> FastAPI:
                 status_code=400, detail=f"Unknown mode: {mode!r}. Try {sorted(VALID_MODES)}."
             )
         polygon_pts = _parse_polygon(polygon)
-        if mode == "mask" and not polygon_pts:
+        poles_pts = _parse_poles(poles)
+        if mode == "mask" and not (polygon_pts or poles_pts):
             raise HTTPException(
-                status_code=400, detail="mode='mask' requires a polygon (≥3 vertices)."
+                status_code=400,
+                detail="mode='mask' requires either a polygon (≥3 vertices) or poles (≥2 points).",
             )
         if mask_engine not in VALID_MASK_ENGINES:
             raise HTTPException(
@@ -221,6 +233,8 @@ def create_app() -> FastAPI:
                     instruction,
                     mode=mode,  # type: ignore[arg-type]
                     mask_polygon=polygon_pts,
+                    poles=poles_pts,
+                    pole_section_height=pole_section_height,
                     system_prompt=custom_system_prompt,
                     reference_crop=ref_crop,
                     mask_engine=mask_engine,  # type: ignore[arg-type]

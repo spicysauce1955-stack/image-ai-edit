@@ -50,7 +50,12 @@ const historyList    = $('#history-list');
 // --- State
 let sceneFile = null;
 let referenceFile = null;
-let polygonPoints = [];
+// `poles` is the new placement primitive: each entry is the BASE position
+// of a fence post in normalized image coords. Sections auto-generate
+// between consecutive poles in click order. Replaces the old polygon
+// vertices for fence-style insertions.
+let poles = [];
+let sectionHeightPct = 18;     // section height as % of image height
 let lastComposite = null;
 const history = [];
 
@@ -81,7 +86,7 @@ bindFileDrop(sceneDrop, sceneInput, (file) => {
 
 function bindFileDrop(drop, input, onFile) {
   drop.addEventListener('click', () => {
-    if (drop.classList.contains('has-image')) return; // clicks become poly vertices
+    if (drop.classList.contains('has-image')) return; // clicks become poles
     input.click();
   });
   drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
@@ -96,7 +101,7 @@ function bindFileDrop(drop, input, onFile) {
   });
 }
 
-// --- Scene editor (image + polygon overlay)
+// --- Scene editor (image + pole overlay)
 function loadSceneEditor(file) {
   const url = URL.createObjectURL(file);
   sceneDrop.classList.add('has-image');
@@ -105,16 +110,18 @@ function loadSceneEditor(file) {
     <svg class="poly-overlay" preserveAspectRatio="none"></svg>`;
   sceneActions.hidden = false;
   polyHint.hidden = false;
+  const poleControls = $('#pole-controls');
+  if (poleControls) poleControls.hidden = false;
 
   const img = sceneDrop.querySelector('img');
   img.addEventListener('load', () => {
     const svg = sceneDrop.querySelector('svg');
     svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
-    redrawPolygon();
+    redrawPoles();
   });
 
-  polygonPoints = [];
-  redrawPolygon();
+  poles = [];
+  redrawPoles();
 }
 
 sceneDrop.addEventListener('click', (e) => {
@@ -126,19 +133,19 @@ sceneDrop.addEventListener('click', (e) => {
   const u = (e.clientX - rect.left) / rect.width;
   const v = (e.clientY - rect.top) / rect.height;
   if (u < 0 || u > 1 || v < 0 || v > 1) return;
-  polygonPoints.push([u, v]);
-  redrawPolygon();
+  poles.push([u, v]);
+  redrawPoles();
 });
 
 clearPolyBtn?.addEventListener('click', (e) => {
   e.stopPropagation();
-  polygonPoints = [];
-  redrawPolygon();
+  poles = [];
+  redrawPoles();
 });
 undoPolyBtn?.addEventListener('click', (e) => {
   e.stopPropagation();
-  polygonPoints.pop();
-  redrawPolygon();
+  poles.pop();
+  redrawPoles();
 });
 replaceSceneBtn?.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -146,21 +153,50 @@ replaceSceneBtn?.addEventListener('click', (e) => {
   sceneInput.click();
 });
 
-function redrawPolygon() {
+const sectionHeightSlider = $('#section-height');
+const sectionHeightDisplay = $('#section-height-display');
+sectionHeightSlider?.addEventListener('input', () => {
+  sectionHeightPct = parseInt(sectionHeightSlider.value, 10);
+  if (sectionHeightDisplay) sectionHeightDisplay.textContent = sectionHeightPct + '%';
+  redrawPoles();
+});
+
+function redrawPoles() {
   const svg = sceneDrop.querySelector('svg.poly-overlay');
   if (!svg) return;
   const img = sceneDrop.querySelector('img.scene-img');
   if (!img || !img.naturalWidth) return;
 
   const W = img.naturalWidth, H = img.naturalHeight;
-  const pts = polygonPoints.map(([u, v]) => `${u * W},${v * H}`).join(' ');
+  const sectionH = (sectionHeightPct / 100) * H;       // section height in image px
+  const poleR = Math.max(W, H) / 140;                  // pole base marker radius
+  const postW = Math.max(W, H) / 140;                  // post column width (visualization)
 
   let body = '';
-  if (polygonPoints.length >= 3) body += `<polygon points="${pts}" />`;
-  else if (polygonPoints.length >= 2) body += `<polyline points="${pts}" />`;
-  for (const [u, v] of polygonPoints) {
-    body += `<circle cx="${u * W}" cy="${v * H}" r="${Math.max(W, H) / 200}" />`;
+
+  // Section parallelograms between consecutive poles.
+  for (let i = 0; i < poles.length - 1; i++) {
+    const [u1, v1] = poles[i], [u2, v2] = poles[i + 1];
+    const x1 = u1 * W, y1 = v1 * H, x2 = u2 * W, y2 = v2 * H;
+    const top1y = Math.max(0, y1 - sectionH);
+    const top2y = Math.max(0, y2 - sectionH);
+    body += `<polygon class="section-quad" points="${x1},${y1} ${x2},${y2} ${x2},${top2y} ${x1},${top1y}" />`;
   }
+
+  // Post columns at each pole.
+  for (const [u, v] of poles) {
+    const x = u * W, y = v * H;
+    const topY = Math.max(0, y - sectionH);
+    body += `<rect class="post-col" x="${x - postW/2}" y="${topY}" width="${postW}" height="${y - topY}" />`;
+  }
+
+  // Pole base markers + numeric labels.
+  poles.forEach(([u, v], idx) => {
+    const x = u * W, y = v * H;
+    body += `<circle class="pole-base" cx="${x}" cy="${y}" r="${poleR}" />`;
+    body += `<text class="pole-label" x="${x}" y="${y - poleR * 1.5}" text-anchor="middle" font-size="${poleR * 2.5}">${idx + 1}</text>`;
+  });
+
   svg.innerHTML = body;
 }
 
@@ -297,8 +333,8 @@ generateBtn.addEventListener('click', () => {
     setStatus('Add an instruction.', true);
     return;
   }
-  if (currentMode === 'mask' && polygonPoints.length < 3) {
-    setStatus('mask mode needs a polygon — click 3+ points on the scene.', true);
+  if (currentMode === 'mask' && poles.length < 2) {
+    setStatus('mask mode needs at least 2 poles — click on the scene where each fence post should stand.', true);
     return;
   }
   history.length = 0;
@@ -308,8 +344,9 @@ generateBtn.addEventListener('click', () => {
   fd.append('reference', referenceFile);
   fd.append('instruction', instructionEl.value);
   fd.append('mode', currentMode);
-  if (polygonPoints.length >= 3) {
-    fd.append('polygon', JSON.stringify(polygonPoints));
+  if (poles.length >= 2) {
+    fd.append('poles', JSON.stringify(poles));
+    fd.append('pole_section_height', (sectionHeightPct / 100).toString());
   }
   if (promptDirty && promptArea.value.trim()) {
     fd.append('system_prompt', promptArea.value);

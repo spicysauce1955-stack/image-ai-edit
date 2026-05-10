@@ -240,6 +240,109 @@ def _rasterize_polygon(
     return buf.getvalue()
 
 
+def _build_poles_mask(
+    scene_bytes: bytes,
+    poles: list[tuple[float, float]],
+    *,
+    section_height_norm: float = 0.18,
+    pole_section_lengths: list[float | None] | None = None,
+    post_width_norm: float = 0.012,
+) -> bytes:
+    """Rasterize a fence-from-poles binary PNG mask matching scene dims.
+
+    The basic unit of a fence is two poles + a section between them.
+    The user places poles at the BASE of the fence (where the post
+    meets the ground); the rendered mask covers both:
+
+      - one post column at each pole, ``post_width_norm * scene_W``
+        pixels wide, extending UP from the click by ``section_height``.
+      - one section parallelogram between every consecutive pair of
+        poles, with the bottom edge along the line connecting their
+        bases and the top edge ``section_height`` pixels above.
+
+    ``pole_section_lengths`` (optional, parallel to ``poles``) gives a
+    per-pole maximum section length in normalized image units. The
+    section between pole_i and pole_{i+1} uses the SMALLER of the two
+    poles' caps (a real-world fencing constraint — a pole only
+    supports panels up to its rated length). When the actual distance
+    between the two clicks exceeds the cap, the section is drawn
+    truncated to ``cap`` pixels along the line from pole_i; the
+    remaining gap signals to the user that an intermediate pole is
+    needed. ``None`` for a pole means "no cap".
+    """
+    if len(poles) < 2:
+        raise ValueError(f"Need at least 2 poles, got {len(poles)}.")
+    if pole_section_lengths is not None and len(pole_section_lengths) != len(poles):
+        raise ValueError(
+            f"pole_section_lengths length {len(pole_section_lengths)} "
+            f"!= poles length {len(poles)}."
+        )
+
+    with Image.open(io.BytesIO(scene_bytes)) as scene:
+        W, H = scene.size
+
+    section_height_px = max(4, int(section_height_norm * H))
+    post_width_px = max(2, int(post_width_norm * W))
+
+    # Convert normalized poles to clamped pixel coords.
+    pole_px = [
+        (
+            max(0, min(W - 1, round(u * W))),
+            max(0, min(H - 1, round(v * H))),
+        )
+        for u, v in poles
+    ]
+
+    mask = Image.new("L", (W, H), 0)
+    draw = ImageDraw.Draw(mask)
+
+    # Sections between consecutive poles.
+    for i in range(len(pole_px) - 1):
+        p1 = pole_px[i]
+        p2 = pole_px[i + 1]
+
+        # Min of both endpoints' max section lengths (in pixels).
+        cap_px: int | None = None
+        if pole_section_lengths is not None:
+            caps_norm = [pole_section_lengths[i], pole_section_lengths[i + 1]]
+            caps_norm_clean = [c for c in caps_norm if c is not None]
+            if caps_norm_clean:
+                cap_px = max(1, int(min(caps_norm_clean) * W))
+
+        if cap_px is not None:
+            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+            d = (dx * dx + dy * dy) ** 0.5
+            if d > cap_px and d > 0:
+                ratio = cap_px / d
+                p2 = (round(p1[0] + dx * ratio), round(p1[1] + dy * ratio))
+
+        # Section parallelogram: bottom along line connecting bases,
+        # top shifted up by section_height. Constant vertical
+        # height in image space — the model handles perspective.
+        section_quad = [
+            (p1[0], p1[1]),
+            (p2[0], p2[1]),
+            (p2[0], max(0, p2[1] - section_height_px)),
+            (p1[0], max(0, p1[1] - section_height_px)),
+        ]
+        draw.polygon(section_quad, fill=255)
+
+    # Post columns at each pole.
+    half_post = post_width_px // 2
+    for px, py in pole_px:
+        draw.rectangle(
+            [
+                (max(0, px - half_post), max(0, py - section_height_px)),
+                (min(W - 1, px + half_post), py),
+            ],
+            fill=255,
+        )
+
+    buf = io.BytesIO()
+    mask.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _build_translucent_prepaste(
     scene_bytes: bytes,
     reference_bytes: bytes,
@@ -535,6 +638,10 @@ async def insert_object(
     *,
     mode: Mode = "free",
     mask_polygon: list[tuple[float, float]] | None = None,
+    poles: list[tuple[float, float]] | None = None,
+    pole_section_height: float = 0.18,
+    pole_section_lengths: list[float | None] | None = None,
+    pole_post_width: float = 0.012,
     system_prompt: str | None = None,
     previous_composite: bytes | None = None,
     previous_mime: str = "image/png",
@@ -638,12 +745,30 @@ async def insert_object(
         edit_text = edit.text
 
     elif mode == "mask":
-        if not mask_polygon:
-            raise ValueError("mask mode requires mask_polygon.")
-        # Visual mask saved on the result for the UI's preview pane —
-        # always white-on-black regardless of which engine runs, so
-        # users see a familiar shape.
-        aux_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
+        # Two ways to define the mask:
+        #   - poles: list of (u, v) — pole-based fence builder. Mask
+        #     auto-generated from sections + post columns. This is the
+        #     primary placement mode for fence use cases.
+        #   - mask_polygon: legacy free-form polygon. Still supported
+        #     for callers that want full mask control via API.
+        if poles:
+            aux_bytes = _build_poles_mask(
+                scene_bytes,
+                poles,
+                section_height_norm=pole_section_height,
+                pole_section_lengths=pole_section_lengths,
+                post_width_norm=pole_post_width,
+            )
+            # Synthesize an effective polygon for any post-clip pass:
+            # a closed loop tracing the bottom-then-top of the fence.
+            mask_polygon = (
+                [(u, v) for u, v in poles]
+                + [(u, max(0.0, v - pole_section_height)) for u, v in reversed(poles)]
+            )
+        elif mask_polygon:
+            aux_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
+        else:
+            raise ValueError("mask mode requires either poles or mask_polygon.")
         aux_kind = "mask"
 
         template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
