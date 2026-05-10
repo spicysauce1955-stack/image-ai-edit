@@ -59,10 +59,10 @@ let sectionHeightPct = 18;     // section height as % of image height
 let lastComposite = null;
 const history = [];
 
-let defaults = { free: '', mask: '', refine: '' };
+let defaults = { free: '', mask: '', overlay: '', refine: '' };
 let currentMode = 'mask';
 let promptDirty = false;
-let overlayAlphaPct = 55;
+let overlayAlphaPct = 85;
 const overlayAlphaSlider = $('#overlay-alpha');
 const alphaDisplay = $('#alpha-display');
 overlayAlphaSlider?.addEventListener('input', () => {

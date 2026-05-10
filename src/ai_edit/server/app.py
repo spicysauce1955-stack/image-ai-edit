@@ -45,6 +45,7 @@ from ..pipeline import insert_object
 from ..pipeline.insert import (
     DEFAULT_FREE_PROMPT,
     DEFAULT_MASK_PROMPT,
+    DEFAULT_OVERLAY_PROMPT,
     DEFAULT_REFINE_PROMPT,
 )
 
@@ -146,6 +147,7 @@ def create_app() -> FastAPI:
         return {
             "free": DEFAULT_FREE_PROMPT,
             "mask": DEFAULT_MASK_PROMPT,
+            "overlay": DEFAULT_OVERLAY_PROMPT,
             "refine": DEFAULT_REFINE_PROMPT,
         }
 
@@ -159,7 +161,7 @@ def create_app() -> FastAPI:
         polygon: str = Form(""),
         poles: str = Form(""),
         pole_section_height: float = Form(0.18),
-        overlay_alpha: float = Form(0.55),
+        overlay_alpha: float = Form(0.85),
         system_prompt: str = Form(""),
         segment: str = Form(""),
         relight: str = Form(""),

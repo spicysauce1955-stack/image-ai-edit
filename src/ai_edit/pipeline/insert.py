@@ -164,13 +164,49 @@ DEFAULT_REFINE_PROMPT = (
     "refinement explicitly asks for. Output only the updated composite."
 )
 
+# Overlay mode: image 1 already shows a clearly-visible grey
+# fence-shaped PLACEHOLDER painted onto the scene (post columns +
+# section panels, neutral grey, no slats / no colour identity / no
+# texture). Image 2 is the actual reference fence whose appearance
+# we want. The model's job is to REPLACE the placeholder pixels
+# with the real fence — taking position/scale/extent from the
+# placeholder geometry and ALL identity (slats, posts, colour,
+# materials) from image 2.
+#
+# We tell the model explicitly that the placeholder is a guide,
+# not content: "the grey shapes disappear in the output". This
+# avoids the model rendering a literal grey fence that copies the
+# placeholder colour.
+DEFAULT_OVERLAY_PROMPT = (
+    "PRESERVATION-CRITICAL EDIT. Image 1 contains an opaque GREY "
+    "FENCE-SHAPED PLACEHOLDER painted onto the scene (visible grey "
+    "post columns + grey section panels). The placeholder is a "
+    "position/scale/extent guide ONLY — it has no texture, no slats, "
+    "no real colour. Replace every placeholder pixel with the actual "
+    "fence shown in image 2 (the reference). The output fence must "
+    "occupy the exact same footprint as the placeholder (same posts, "
+    "same panels, same height, same perspective), but its appearance — "
+    "slats, posts, panel design, colour, material, seams, texture, "
+    "edges — must come entirely from image 2. The grey placeholder "
+    "must NOT appear in the output; it is fully replaced by the real "
+    "fence. Cast a soft realistic ground shadow matching the scene's "
+    "existing shadow direction.\n\n"
+    "OUTSIDE the placeholder footprint: every pixel must remain "
+    "identical to the input scene. Do not redraw, repaint, recolour, "
+    "restyle, or even slightly modify the lawn, the patio, planters, "
+    "umbrellas, existing fences outside the placeholder, the house, "
+    "the sky, or any trees/foliage. The only change in the entire "
+    "output image is the new fence replacing the grey placeholder."
+)
 
-def default_system_prompt(mode: Mode | Literal["refine"]) -> str:
+
+def default_system_prompt(mode: Mode | Literal["refine", "overlay"]) -> str:
     """Return the default system prompt for a given mode."""
     return {
         "free": DEFAULT_FREE_PROMPT,
         "mask": DEFAULT_MASK_PROMPT,
         "refine": DEFAULT_REFINE_PROMPT,
+        "overlay": DEFAULT_OVERLAY_PROMPT,
     }[mode]
 
 
@@ -464,11 +500,13 @@ def _build_poles_overlay(
     ]
 
     panel_alpha = max(0, min(255, int(alpha * 255)))
-    # Posts get a slightly stronger alpha than panels so the post
-    # silhouette is unambiguous in the placeholder (real fences look
-    # like alternating solid/lattice — we mimic that visual cue).
-    post_alpha = max(0, min(255, int(min(1.0, alpha + 0.20) * 255)))
-    line_alpha = max(0, min(255, int(min(1.0, alpha + 0.10) * 255)))
+    # Posts and outlines are drawn fully solid once alpha ≥ ~0.80
+    # so the placeholder reads as an opaque grey "thing" the model
+    # is being asked to replace, rather than a faint hint that
+    # might be ignored. With alpha=0.85 default: panels ≈ 217/255,
+    # posts and outlines = 255/255 (fully opaque).
+    post_alpha = max(0, min(255, int(min(1.0, alpha + 0.15) * 255)))
+    line_alpha = max(0, min(255, int(min(1.0, alpha + 0.15) * 255)))
 
     panel_rgba = (*_PLACEHOLDER_PANEL_RGB, panel_alpha)
     post_rgba = (*_PLACEHOLDER_POST_RGB, post_alpha)
@@ -830,7 +868,7 @@ async def insert_object(
     pole_section_height: float = 0.18,
     pole_section_lengths: list[float | None] | None = None,
     pole_post_width: float = 0.012,
-    overlay_alpha: float = 0.55,
+    overlay_alpha: float = 0.85,
     system_prompt: str | None = None,
     previous_composite: bytes | None = None,
     previous_mime: str = "image/png",
@@ -986,7 +1024,11 @@ async def insert_object(
             aux_kind = "mask"
             engine_scene_bytes = scene_bytes
 
-        template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
+        # Overlay mode uses a dedicated template that talks about
+        # the visible grey placeholder; mask mode uses the binary
+        # mask template that talks about the white region.
+        prompt_mode: Literal["mask", "overlay"] = "overlay" if mode == "overlay" else "mask"
+        template = system_prompt.strip() if system_prompt else default_system_prompt(prompt_mode)
 
         # Post-clip with dilated + Gaussian-feathered polygon.
         #

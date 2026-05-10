@@ -65,14 +65,14 @@
         <div class="modes" role="radiogroup" aria-label="Placement mode">
           <label class="mode-pill"><input type="radio" name="mode" value="free" /><span><strong>Free</strong><small>Model picks placement.<br/>Poles ignored.</small></span></label>
           <label class="mode-pill"><input type="radio" name="mode" value="mask" checked /><span><strong>Mask</strong><small>Binary mask from poles.<br/>Strict region.</small></span></label>
-          <label class="mode-pill"><input type="radio" name="mode" value="overlay" /><span><strong>Overlay</strong><small>Reference perspective-warped<br/>into pole sections at 55%.</small></span></label>
+          <label class="mode-pill"><input type="radio" name="mode" value="overlay" /><span><strong>Overlay</strong><small>Opaque grey fence placeholder<br/>painted onto the scene at 85%.</small></span></label>
         </div>
       </div>
 
       <!-- Overlay alpha (only meaningful in overlay mode) -->
       <details class="advanced">
-        <summary>Overlay alpha <small class="muted" id="alpha-display">55%</small></summary>
-        <input type="range" id="overlay-alpha" min="20" max="90" value="55" step="5" style="width:100%;accent-color:var(--accent);" />
+        <summary>Overlay alpha <small class="muted" id="alpha-display">85%</small></summary>
+        <input type="range" id="overlay-alpha" min="40" max="100" value="85" step="5" style="width:100%;accent-color:var(--accent);" />
       </details>
 
       <!-- Instruction -->
