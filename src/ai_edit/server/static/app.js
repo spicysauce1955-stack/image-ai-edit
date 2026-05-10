@@ -60,8 +60,15 @@ let lastComposite = null;
 const history = [];
 
 let defaults = { free: '', mask: '', refine: '' };
-let currentMode = 'free';
+let currentMode = 'mask';
 let promptDirty = false;
+let overlayAlphaPct = 55;
+const overlayAlphaSlider = $('#overlay-alpha');
+const alphaDisplay = $('#alpha-display');
+overlayAlphaSlider?.addEventListener('input', () => {
+  overlayAlphaPct = parseInt(overlayAlphaSlider.value, 10);
+  if (alphaDisplay) alphaDisplay.textContent = overlayAlphaPct + '%';
+});
 
 // --- Defaults bootstrap
 fetch('/api/defaults')
@@ -251,7 +258,9 @@ function renderResult(blob, label, kind, auxUrl, auxKind) {
   canvasEl.innerHTML = `<img src="${url}" alt="composite" />`;
   if (auxUrl && auxKind) {
     auxImg.src = auxUrl;
-    auxLabel.textContent = 'Mask sent to model:';
+    auxLabel.textContent = auxKind === 'overlay'
+      ? 'Overlay sent to model:'
+      : 'Mask sent to model:';
     auxRow.hidden = false;
   } else {
     auxRow.hidden = true;
@@ -333,8 +342,8 @@ generateBtn.addEventListener('click', () => {
     setStatus('Add an instruction.', true);
     return;
   }
-  if (currentMode === 'mask' && poles.length < 2) {
-    setStatus('mask mode needs at least 2 poles — click on the scene where each fence post should stand.', true);
+  if ((currentMode === 'mask' || currentMode === 'overlay') && poles.length < 2) {
+    setStatus(`${currentMode} mode needs at least 2 poles — click on the scene where each fence post should stand.`, true);
     return;
   }
   history.length = 0;
@@ -347,6 +356,9 @@ generateBtn.addEventListener('click', () => {
   if (poles.length >= 2) {
     fd.append('poles', JSON.stringify(poles));
     fd.append('pole_section_height', (sectionHeightPct / 100).toString());
+    if (currentMode === 'overlay') {
+      fd.append('overlay_alpha', (overlayAlphaPct / 100).toString());
+    }
   }
   if (promptDirty && promptArea.value.trim()) {
     fd.append('system_prompt', promptArea.value);

@@ -112,7 +112,7 @@ def _parse_poles(raw: str) -> list[tuple[float, float]] | None:
     return _parse_uv_list(raw, min_count=2, label="poles")
 
 
-VALID_MODES: set[str] = {"free", "mask"}
+VALID_MODES: set[str] = {"free", "mask", "overlay"}
 VALID_MASK_ENGINES: set[str] = {
     "gpt_image_2",
     "gemini_translucent",
@@ -159,6 +159,7 @@ def create_app() -> FastAPI:
         polygon: str = Form(""),
         poles: str = Form(""),
         pole_section_height: float = Form(0.18),
+        overlay_alpha: float = Form(0.55),
         system_prompt: str = Form(""),
         segment: str = Form(""),
         relight: str = Form(""),
@@ -183,10 +184,15 @@ def create_app() -> FastAPI:
             )
         polygon_pts = _parse_polygon(polygon)
         poles_pts = _parse_poles(poles)
-        if mode == "mask" and not (polygon_pts or poles_pts):
+        if mode in ("mask", "overlay") and not (polygon_pts or poles_pts):
             raise HTTPException(
                 status_code=400,
-                detail="mode='mask' requires either a polygon (≥3 vertices) or poles (≥2 points).",
+                detail=f"mode={mode!r} requires either a polygon (≥3 vertices) or poles (≥2 points).",
+            )
+        if mode == "overlay" and not poles_pts:
+            raise HTTPException(
+                status_code=400,
+                detail="mode='overlay' requires poles (perspective warp uses pole geometry).",
             )
         if mask_engine not in VALID_MASK_ENGINES:
             raise HTTPException(
@@ -235,6 +241,7 @@ def create_app() -> FastAPI:
                     mask_polygon=polygon_pts,
                     poles=poles_pts,
                     pole_section_height=pole_section_height,
+                    overlay_alpha=overlay_alpha,
                     system_prompt=custom_system_prompt,
                     reference_crop=ref_crop,
                     mask_engine=mask_engine,  # type: ignore[arg-type]

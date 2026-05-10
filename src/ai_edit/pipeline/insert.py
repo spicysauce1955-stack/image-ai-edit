@@ -72,7 +72,7 @@ from PIL import Image, ImageDraw
 from ..models.base import SegmentationMask
 from ..providers import FalAI, Gemini, OpenAI, Replicate
 
-Mode = Literal["free", "mask"]
+Mode = Literal["free", "mask", "overlay"]
 MaskEngine = Literal[
     "gpt_image_2",        # default — OpenAI's April 2026 model; instruction-following solves semantic prior
     "gemini_translucent", # pre-paste reference at 55% alpha → Nano Banana Pro
@@ -84,7 +84,7 @@ MaskEngine = Literal[
     "openai",             # OpenAI direct
     "flux_prepaste",      # FLUX prepaste fallback
 ]
-AuxKind = Literal["mask", "previous"]
+AuxKind = Literal["mask", "overlay", "previous"]
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +340,166 @@ def _build_poles_mask(
 
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _perspective_coeffs(
+    src: list[tuple[float, float]],
+    dst: list[tuple[float, float]],
+) -> list[float]:
+    """8 perspective coefficients for ``Image.transform(..., PERSPECTIVE)``.
+
+    The PIL transform interprets coefficients as the *inverse* mapping
+    from output coords back to source: for output pixel ``(x, y)`` it
+    samples the source at:
+
+        src_x = (a*x + b*y + c) / (g*x + h*y + 1)
+        src_y = (d*x + e*y + f) / (g*x + h*y + 1)
+
+    To map an output quadrilateral (``dst``) back to source-rectangle
+    corners (``src``) we solve the standard 8-equation linear system.
+    """
+    import numpy as _np
+
+    matrix = []
+    for s, d in zip(src, dst):
+        matrix.append([d[0], d[1], 1, 0, 0, 0, -s[0] * d[0], -s[0] * d[1]])
+        matrix.append([0, 0, 0, d[0], d[1], 1, -s[1] * d[0], -s[1] * d[1]])
+    A = _np.array(matrix, dtype=_np.float64)
+    B = _np.array([c for s in src for c in s], dtype=_np.float64)
+    return list(_np.linalg.solve(A, B))
+
+
+def _warp_reference_to_quad(
+    reference: Image.Image,
+    quad_corners: list[tuple[int, int]],
+    canvas_size: tuple[int, int],
+) -> Image.Image:
+    """Perspective-warp ``reference`` into ``quad_corners`` on a canvas.
+
+    ``quad_corners`` are 4 points in OUTPUT pixel space — ordered
+    bl, br, tr, tl (matching the section parallelogram corners). The
+    full reference rectangle gets perspective-transformed so its four
+    corners land on those four points; pixels outside the polygon are
+    transparent.
+    """
+    rW, rH = reference.size
+    src = [(0, rH), (rW, rH), (rW, 0), (0, 0)]  # bl, br, tr, tl in ref space
+    coeffs = _perspective_coeffs(src, [(d[0], d[1]) for d in quad_corners])
+
+    warped = reference.convert("RGBA").transform(
+        canvas_size,
+        Image.PERSPECTIVE,
+        coeffs,
+        Image.BICUBIC,
+        fillcolor=(0, 0, 0, 0),
+    )
+    # Clip outside the quad — perspective transform fills the whole
+    # canvas with extrapolated samples; we only want the parallelogram.
+    poly_mask = Image.new("L", canvas_size, 0)
+    ImageDraw.Draw(poly_mask).polygon(quad_corners, fill=255)
+    transparent = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    return Image.composite(warped, transparent, poly_mask)
+
+
+def _build_poles_overlay(
+    scene_bytes: bytes,
+    reference_bytes: bytes,
+    poles: list[tuple[float, float]],
+    *,
+    section_height_norm: float = 0.18,
+    pole_section_lengths: list[float | None] | None = None,
+    alpha: float = 0.55,
+    reference_crop: tuple[float, float] | None = None,
+) -> bytes:
+    """Pre-paste warped reference fence sections onto the scene.
+
+    For each consecutive pair of poles, perspective-warp the reference
+    image into the section parallelogram and composite onto a copy of
+    the scene at fractional ``alpha``. The result is a single image
+    where the user's intended fence is visibly previewed in the
+    correct positions, perspectives, and angles — but at low opacity
+    so a downstream model (Nano Banana / gpt_image_2) re-renders
+    cleanly rather than copy-pasting the warped texture.
+
+    Empirically (see docs/results/26-translucent-* for the polygon
+    version) ``alpha=0.55`` is the goldilocks zone:
+
+      - Below ~0.3: model can't see the placement clearly, falls back
+        to semantic prior.
+      - 0.5–0.6: clear placement cue, model re-renders cleanly.
+      - Above ~0.75: model copy-pastes the warped (low-fidelity) texture.
+
+    Per-pole section length caps work the same as in
+    :func:`_build_poles_mask` — the section between two poles uses
+    the smaller of the two endpoints' max lengths and truncates if
+    the actual click distance exceeds the cap.
+    """
+    if len(poles) < 2:
+        raise ValueError(f"Need at least 2 poles, got {len(poles)}.")
+
+    with Image.open(io.BytesIO(scene_bytes)) as raw_scene:
+        scene = raw_scene.convert("RGB")
+    with Image.open(io.BytesIO(reference_bytes)) as raw_ref:
+        ref = raw_ref.convert("RGB")
+
+    if reference_crop:
+        top, bot = reference_crop
+        rH = ref.height
+        ref = ref.crop((0, int(top * rH), ref.width, int(bot * rH)))
+
+    W, H = scene.size
+    section_height_px = max(4, int(section_height_norm * H))
+    pole_px = [
+        (
+            max(0, min(W - 1, round(u * W))),
+            max(0, min(H - 1, round(v * H))),
+        )
+        for u, v in poles
+    ]
+
+    base = scene.convert("RGBA")
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    for i in range(len(pole_px) - 1):
+        p1 = pole_px[i]
+        p2 = pole_px[i + 1]
+
+        cap_px: int | None = None
+        if pole_section_lengths is not None:
+            caps = [pole_section_lengths[i], pole_section_lengths[i + 1]]
+            caps_clean = [c for c in caps if c is not None]
+            if caps_clean:
+                cap_px = max(1, int(min(caps_clean) * W))
+        if cap_px is not None:
+            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+            d = (dx * dx + dy * dy) ** 0.5
+            if d > cap_px and d > 0:
+                ratio = cap_px / d
+                p2 = (round(p1[0] + dx * ratio), round(p1[1] + dy * ratio))
+
+        # Section parallelogram in OUTPUT pixel space (bl, br, tr, tl).
+        quad = [
+            (p1[0], p1[1]),
+            (p2[0], p2[1]),
+            (p2[0], max(0, p2[1] - section_height_px)),
+            (p1[0], max(0, p1[1] - section_height_px)),
+        ]
+        # Skip degenerate sections (zero-area).
+        if abs(p2[0] - p1[0]) + abs(p2[1] - p1[1]) < 2:
+            continue
+
+        warped = _warp_reference_to_quad(ref, quad, (W, H))
+        overlay = Image.alpha_composite(overlay, warped)
+
+    if alpha < 1.0:
+        a_band = overlay.split()[3]
+        a_band = a_band.point(lambda x, frac=alpha: int(x * frac))
+        overlay.putalpha(a_band)
+
+    result = Image.alpha_composite(base, overlay).convert("RGB")
+    buf = io.BytesIO()
+    result.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -642,6 +802,7 @@ async def insert_object(
     pole_section_height: float = 0.18,
     pole_section_lengths: list[float | None] | None = None,
     pole_post_width: float = 0.012,
+    overlay_alpha: float = 0.55,
     system_prompt: str | None = None,
     previous_composite: bytes | None = None,
     previous_mime: str = "image/png",
@@ -744,32 +905,55 @@ async def insert_object(
         raw_mime = edit.mime_type
         edit_text = edit.text
 
-    elif mode == "mask":
-        # Two ways to define the mask:
-        #   - poles: list of (u, v) — pole-based fence builder. Mask
-        #     auto-generated from sections + post columns. This is the
-        #     primary placement mode for fence use cases.
-        #   - mask_polygon: legacy free-form polygon. Still supported
-        #     for callers that want full mask control via API.
+    elif mode in ("mask", "overlay"):
+        # Both modes share the same placement primitive (poles or
+        # legacy polygon) and the same downstream engines. They
+        # differ only in what gets sent as the SCENE input:
+        #   - mask:    original scene + binary mask
+        #   - overlay: scene with reference fence pre-pasted at
+        #              translucent alpha into the section quads
+        #              (perspective-warped per section), + the same
+        #              binary mask. Gives the model a visible
+        #              preview of placement + identity together.
         if poles:
-            aux_bytes = _build_poles_mask(
+            binary_mask_bytes = _build_poles_mask(
                 scene_bytes,
                 poles,
                 section_height_norm=pole_section_height,
                 pole_section_lengths=pole_section_lengths,
                 post_width_norm=pole_post_width,
             )
-            # Synthesize an effective polygon for any post-clip pass:
-            # a closed loop tracing the bottom-then-top of the fence.
             mask_polygon = (
                 [(u, v) for u, v in poles]
                 + [(u, max(0.0, v - pole_section_height)) for u, v in reversed(poles)]
             )
         elif mask_polygon:
-            aux_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
+            binary_mask_bytes = _rasterize_polygon(scene_bytes, mask_polygon)
         else:
-            raise ValueError("mask mode requires either poles or mask_polygon.")
-        aux_kind = "mask"
+            raise ValueError(f"{mode!r} mode requires either poles or mask_polygon.")
+
+        if mode == "overlay":
+            if not poles:
+                raise ValueError("overlay mode requires poles (perspective warp uses pole geometry).")
+            overlay_scene_bytes = _build_poles_overlay(
+                scene_bytes,
+                reference_bytes,
+                poles,
+                section_height_norm=pole_section_height,
+                pole_section_lengths=pole_section_lengths,
+                alpha=overlay_alpha,
+                reference_crop=reference_crop,
+            )
+            # Aux preview shows the overlay (what the model saw); the
+            # original scene is still used for the post-clip pass so
+            # pixels outside the polygon are guaranteed identical.
+            aux_bytes = overlay_scene_bytes
+            aux_kind = "overlay"
+            engine_scene_bytes = overlay_scene_bytes
+        else:  # mode == "mask"
+            aux_bytes = binary_mask_bytes
+            aux_kind = "mask"
+            engine_scene_bytes = scene_bytes
 
         template = system_prompt.strip() if system_prompt else default_system_prompt("mask")
 
@@ -822,19 +1006,15 @@ async def insert_object(
 
         if mask_engine == "gpt_image_2":
             # OpenAI's gpt-image-2 (released April 21, 2026) hosted on
-            # fal at openai/gpt-image-2/edit. Headline upgrade vs
-            # gpt-image-1: "stronger instruction following" — which
-            # empirically does fix the semantic-prior trap. On
-            # variant-B (the lawn polygon where every prior gpt-image
-            # variant relocated the fence to the back wall),
-            # gpt-image-2 places the fence inside the polygon
-            # cleanly with vertical slats + posts + scene preserved.
-            # Slow (~200s at quality=high) but architecturally the
-            # correct primitive.
+            # fal at openai/gpt-image-2/edit. The mask field is the
+            # binary pole/polygon mask; the scene field is the
+            # original scene (mask mode) or the pre-pasted overlay
+            # (overlay mode) — gpt-image-2 sees the warped fence
+            # already positioned and re-renders cleanly.
             fal = falai or FalAI()
             edit_resp = await fal.gpt_image_2.edit(
-                scene=(scene_bytes, scene_mime),
-                mask=(aux_bytes, "image/png"),
+                scene=(engine_scene_bytes, scene_mime if engine_scene_bytes is scene_bytes else "image/png"),
+                mask=(binary_mask_bytes, "image/png"),
                 references=[(reference_bytes, reference_mime)],
                 prompt=f"{instruction}. {template}",
                 quality=gpt_image_2_quality,
@@ -897,8 +1077,8 @@ async def insert_object(
                 "perspective and lighting"
             )
             edit_resp = await fal.flux_ref_inpaint.edit(
-                scene=(scene_bytes, scene_mime),
-                mask=(aux_bytes, "image/png"),
+                scene=(engine_scene_bytes, scene_mime if engine_scene_bytes is scene_bytes else "image/png"),
+                mask=(binary_mask_bytes, "image/png"),
                 reference=(reference_bytes, reference_mime),
                 prompt=flux_prompt,
                 reference_strength=flux_ref_strength,
@@ -973,8 +1153,8 @@ async def insert_object(
 
             # 2. AnyDoor placement pass.
             ad_resp = await rep.anydoor.edit(
-                scene=(scene_bytes, scene_mime),
-                scene_mask=(aux_bytes, "image/png"),
+                scene=(engine_scene_bytes, scene_mime if engine_scene_bytes is scene_bytes else "image/png"),
+                scene_mask=(binary_mask_bytes, "image/png"),
                 reference=(reference_bytes, reference_mime),
                 reference_mask=(ref_mask_bytes, "image/png"),
                 steps=50,
@@ -989,7 +1169,7 @@ async def insert_object(
             fal = falai or FalAI()
             refine_resp = await fal.gpt_image.edit(
                 scene=(ad_resp.image_bytes, "image/png"),
-                mask=(aux_bytes, "image/png"),
+                mask=(binary_mask_bytes, "image/png"),
                 references=[(reference_bytes, reference_mime)],
                 prompt=f"{instruction}. {CHAIN_REFINE_PROMPT}",
                 input_fidelity="high",
@@ -1012,8 +1192,8 @@ async def insert_object(
             # prompt cuts outside-mask drift from ~24% to ~6.5%.
             fal = falai or FalAI()
             edit_resp = await fal.gpt_image.edit(
-                scene=(scene_bytes, scene_mime),
-                mask=(aux_bytes, "image/png"),
+                scene=(engine_scene_bytes, scene_mime if engine_scene_bytes is scene_bytes else "image/png"),
+                mask=(binary_mask_bytes, "image/png"),
                 references=[(reference_bytes, reference_mime)],
                 prompt=f"{instruction}. {template}",
                 input_fidelity="high",
@@ -1033,7 +1213,7 @@ async def insert_object(
             # key) using "object" or the user's instruction as the
             # text prompt for the segmenter.
             rep = replicate or Replicate()
-            mask_bytes = aux_bytes  # white-on-black scene mask
+            mask_bytes = binary_mask_bytes  # white-on-black scene mask
 
             # Auto-segment the reference object via Grounded-SAM. The
             # binary mask we want is labelled with the segmentation
@@ -1058,7 +1238,7 @@ async def insert_object(
                 )
 
             ad_resp = await rep.anydoor.edit(
-                scene=(scene_bytes, scene_mime),
+                scene=(engine_scene_bytes, scene_mime if engine_scene_bytes is scene_bytes else "image/png"),
                 scene_mask=(mask_bytes, "image/png"),
                 reference=(reference_bytes, reference_mime),
                 reference_mask=(ref_mask_bytes, "image/png"),
@@ -1076,7 +1256,7 @@ async def insert_object(
             oai_mask = _build_openai_mask(scene_bytes, mask_polygon)
             oai = openai or OpenAI()
             oai_resp = await oai.image_edit.edit(
-                scene=(scene_bytes, scene_mime),
+                scene=(engine_scene_bytes, scene_mime if engine_scene_bytes is scene_bytes else "image/png"),
                 mask=(oai_mask, "image/png"),
                 references=[(reference_bytes, reference_mime)],
                 prompt=f"{instruction}. {template}",
@@ -1144,8 +1324,8 @@ async def insert_object(
         composite_mime=final_mime,
         composite_bytes_raw=raw_bytes,
         composite_bytes_relit=relit_bytes,
-        aux_bytes=aux_bytes if aux_kind == "mask" else b"",
-        aux_kind=aux_kind if aux_kind == "mask" else None,
+        aux_bytes=aux_bytes if aux_kind in ("mask", "overlay") else b"",
+        aux_kind=aux_kind if aux_kind in ("mask", "overlay") else None,
         masks=masks,
         text=edit_text,
     )
