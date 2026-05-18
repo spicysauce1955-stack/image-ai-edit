@@ -7,6 +7,8 @@ of the abstract capability classes defined here:
 - :class:`ImageModel` — text-to-image generation.
 - :class:`SegmentationModel` — image → per-label binary masks.
 - :class:`EditModel` — multi-image edit / object insertion.
+- :class:`Scene3DModel` — text + optional reference images → 3D asset (glTF/USDZ).
+- :class:`Format3DConverter` — 3D asset format conversion (e.g. GLB → USDZ).
 
 The dataclasses below normalize provider responses into a shape the rest
 of the codebase can consume without knowing which vendor produced them.
@@ -106,6 +108,69 @@ class SegmentationResponse:
 
     masks: list[SegmentationMask] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+# 3D asset MIME types — declared here once so providers, server routes,
+# and tests all reference the same string and a typo can't cause a silent
+# fallback to a wrong viewer. See ar-plan.md for why we standardize on
+# glTF binary + USDZ.
+MIME_GLB = "model/gltf-binary"
+MIME_GLTF_JSON = "model/gltf+json"
+MIME_USDZ = "model/vnd.usdz+zip"
+
+
+@dataclass
+class Scene3DAsset:
+    """One concrete 3D-asset file produced by a :class:`Scene3DModel`
+    (or a :class:`Format3DConverter`).
+
+    A single logical model often ships in two formats (GLB for WebXR /
+    Android Scene Viewer, USDZ for iOS Quick Look). Each format is its
+    own :class:`Scene3DAsset`; the container is :class:`Scene3DResponse`.
+
+    ``extension`` is the leading-dot filename suffix (``".glb"``,
+    ``".usdz"``) — convenient when dumping to ``out/scenes/`` without
+    having to map MIME → extension at every call site.
+    """
+
+    data: bytes
+    mime_type: str
+    extension: str
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Scene3DResponse:
+    """Result of one :class:`Scene3DModel` call.
+
+    Most providers return a single asset (e.g. just a GLB). When a
+    pipeline runs that GLB through a :class:`Format3DConverter` to add a
+    USDZ variant, the resulting response carries both — same logical
+    asset, two formats — and downstream code uses :meth:`find` to grab
+    the variant it needs.
+
+    ``text`` mirrors :attr:`EditResponse.text`: optional model commentary
+    (e.g. Meshy returning a description alongside the mesh). Safe to
+    ignore for the happy path; useful when debugging refusals or
+    truncated outputs.
+    """
+
+    assets: list[Scene3DAsset] = field(default_factory=list)
+    text: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def find(self, mime_type: str) -> Scene3DAsset | None:
+        """Return the first asset matching ``mime_type``, or ``None``.
+
+        Compared case-sensitively against the standard MIME strings
+        (:data:`MIME_GLB`, :data:`MIME_USDZ`). Callers wanting "any glTF
+        flavour" should check ``MIME_GLB`` and ``MIME_GLTF_JSON``
+        explicitly.
+        """
+        for asset in self.assets:
+            if asset.mime_type == mime_type:
+                return asset
+        return None
 
 
 @dataclass
@@ -253,3 +318,52 @@ class EditModel(ABC):
         model: str | None = None,
         **kwargs: Any,
     ) -> EditResponse: ...
+
+
+class Scene3DModel(ABC):
+    """Text-and-reference → 3D asset capability.
+
+    Concrete providers (Meshy, Tripo, Stable Point Aware 3D, Rodin, …)
+    implement this to turn an instruction and zero or more reference
+    images into a :class:`Scene3DResponse`.
+
+    ``references`` is a list of ``(image_bytes, mime_type)`` tuples
+    matching the convention used by :class:`EditModel`. Most generators
+    accept at most one reference; passing several is allowed and the
+    provider is free to use only the first.
+
+    ``target_format`` is a portable hint (``"glb"``, ``"usdz"``,
+    ``"gltf"``). Not every provider honors every format — those that
+    can only produce GLB ignore the hint and emit GLB, leaving USDZ
+    generation to a downstream :class:`Format3DConverter`.
+    """
+
+    @abstractmethod
+    async def generate(
+        self,
+        prompt: str,
+        references: list[tuple[bytes, str]] | None = None,
+        *,
+        model: str | None = None,
+        target_format: str = "glb",
+        **kwargs: Any,
+    ) -> Scene3DResponse: ...
+
+
+class Format3DConverter(ABC):
+    """Convert a :class:`Scene3DAsset` from one format to another.
+
+    The common case is GLB → USDZ (for iOS Quick Look). Implementations
+    may be local (a CLI wrapper around Apple's ``usdzconvert``) or
+    hosted (fal.ai or Replicate conversion endpoints). The interface is
+    the same either way so the pipeline can swap them without changing
+    call sites.
+    """
+
+    @abstractmethod
+    async def convert(
+        self,
+        source: Scene3DAsset,
+        target_format: str,
+        **kwargs: Any,
+    ) -> Scene3DAsset: ...

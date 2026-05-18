@@ -6,13 +6,20 @@ reaching into the submodule.
 """
 
 from .base import (
+    MIME_GLB,
+    MIME_GLTF_JSON,
+    MIME_USDZ,
     BaseProvider,
     ChatResponse,
     EditModel,
     EditResponse,
+    Format3DConverter,
     ImageModel,
     ImageResponse,
     Message,
+    Scene3DAsset,
+    Scene3DModel,
+    Scene3DResponse,
     SegmentationMask,
     SegmentationModel,
     SegmentationResponse,
@@ -22,13 +29,20 @@ from .base import (
 )
 
 __all__ = [
+    "MIME_GLB",
+    "MIME_GLTF_JSON",
+    "MIME_USDZ",
     "BaseProvider",
     "ChatResponse",
     "EditModel",
     "EditResponse",
+    "Format3DConverter",
     "ImageModel",
     "ImageResponse",
     "Message",
+    "Scene3DAsset",
+    "Scene3DModel",
+    "Scene3DResponse",
     "SegmentationMask",
     "SegmentationModel",
     "SegmentationResponse",

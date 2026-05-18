@@ -25,3 +25,8 @@ server = [
     "uvicorn[standard]>=0.32",
     "python-multipart>=0.0.20",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+asyncio_mode = "auto"
