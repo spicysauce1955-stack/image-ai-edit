@@ -107,6 +107,45 @@ out/
 
 Mask PNGs are typically white-on-black; open one and overlay it on the scene in any image editor to confirm the segmentation hit the right region.
 
+## AR delivery (Phase 1)
+
+The web server exposes `/ar/<scene-id>` for `<model-viewer>` + native AR
+handoff. Phase 1 only serves pre-placed assets — drop a GLB at
+`out/scenes/<scene-id>/model.glb` (and optionally a USDZ alongside) and
+hit the URL from a phone.
+
+### Quick manual smoke
+
+```bash
+# 1. Seed a known-good demo (Khronos Box ~3 KB)
+.venv/bin/python scripts/fetch_ar_demo.py            # writes out/scenes/demo/model.glb
+
+# 2. Start the server
+.venv/bin/python scripts/serve.py                    # http://127.0.0.1:8000
+
+# 3. From your phone on the same LAN:
+#    http://<your-laptop-ip>:8000/ar/demo
+```
+
+Expected:
+- 3D preview rotates on the page.
+- On Android: "View in your space" → Scene Viewer launches → place the
+  box in your camera view.
+- On iOS: Quick Look will say "AR not supported" until you drop a
+  USDZ at `out/scenes/demo/model.usdz`. Phase 2 will automate this.
+
+### Troubleshooting AR
+
+- **Page 404s** — no asset exists for that `scene-id`. The store only
+  considers a scene "to exist" once at least one asset is written.
+- **Android AR button missing** — confirm GLB MIME with
+  `curl -I http://localhost:8000/ar/demo/model.glb` (should say
+  `model/gltf-binary`).
+- **iOS AR button missing** — no `model.usdz` present (expected pre-Phase-2).
+- **Scene ID rejected with 422** — the path-param regex is
+  `[A-Za-z0-9_-]{1,64}`. Dots, slashes, spaces are blocked on purpose
+  (path-traversal defence).
+
 ## Cost per run (rough)
 
 | Step | Cost |

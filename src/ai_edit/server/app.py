@@ -42,14 +42,17 @@ from fastapi.staticfiles import StaticFiles
 
 from ..config import load_env
 from ..pipeline import insert_object
+from ..pipeline.ar_store import ARStore, FilesystemARStore
 from ..pipeline.insert import (
     DEFAULT_FREE_PROMPT,
     DEFAULT_MASK_PROMPT,
     DEFAULT_OVERLAY_PROMPT,
     DEFAULT_REFINE_PROMPT,
 )
+from .ar_routes import build_ar_router
 
 STATIC_DIR = Path(__file__).parent / "static"
+DEFAULT_AR_ROOT = Path.cwd() / "out" / "scenes"
 
 
 @dataclass
@@ -127,11 +130,18 @@ VALID_MASK_ENGINES: set[str] = {
 }
 
 
-def create_app() -> FastAPI:
-    """Build and return the FastAPI app."""
+def create_app(ar_store: ARStore | None = None) -> FastAPI:
+    """Build and return the FastAPI app.
+
+    ``ar_store`` lets tests inject an isolated AR store backed by
+    ``tmp_path`` instead of the on-disk ``out/scenes/`` directory.
+    Production callers pass nothing and get the default filesystem
+    store rooted at ``out/scenes``.
+    """
     load_env()
     app = FastAPI(title="image-ai-edit", version="0.1.0")
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.include_router(build_ar_router(ar_store or FilesystemARStore(DEFAULT_AR_ROOT)))
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
