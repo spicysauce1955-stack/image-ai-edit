@@ -88,10 +88,29 @@ def _render_live_html(scene_id: str) -> str:
                  pointer-events: auto; background: rgba(0,0,0,0.45);
                  padding: 6px 10px; border-radius: 16px; }}
   #info .back:hover {{ opacity: 1; }}
-  #overlay {{ position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
-              z-index: 4; pointer-events: none; }}
-  #status {{ background: rgba(0,0,0,0.55); padding: 8px 14px; border-radius: 12px;
+  #overlay {{ position: fixed; inset: 0; z-index: 4; pointer-events: none; }}
+  #overlay > * {{ pointer-events: auto; }}
+  #status {{ position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%);
+             background: rgba(0,0,0,0.55); padding: 8px 14px; border-radius: 12px;
              font-size: 13px; max-width: 80vw; text-align: center; }}
+  #panel {{ position: absolute; right: 12px; bottom: 96px; width: 240px;
+            background: rgba(0,0,0,0.65); padding: 12px 14px; border-radius: 12px;
+            backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+            display: flex; flex-direction: column; gap: 10px; font-size: 12px; }}
+  #panel label {{ display: flex; flex-direction: column; gap: 4px; color: #ddd; }}
+  #panel label span.row {{ display: flex; justify-content: space-between;
+                           font-size: 11px; opacity: 0.8; }}
+  #panel select, #panel input[type=range] {{ width: 100%; }}
+  #panel select {{ background: #222; color: #eee; border: 1px solid #333;
+                   padding: 6px; border-radius: 6px; }}
+  #panel button {{ background: #fff; color: #111; border: 0; padding: 8px;
+                   border-radius: 8px; font-weight: 600; cursor: pointer; }}
+  #panel button.ghost {{ background: transparent; color: #ddd;
+                         border: 1px solid #444; font-weight: 500; }}
+  @media (max-width: 480px) {{
+    #panel {{ left: 12px; right: 12px; width: auto; bottom: 96px; }}
+    #status {{ bottom: 220px; }}
+  }}
   /* ARButton injects an absolutely-positioned button — match the
      model-viewer pill style so the two AR pages feel related. */
   button.xr-button, .xr-button {{ position: fixed !important;
@@ -118,6 +137,21 @@ def _render_live_html(scene_id: str) -> str:
 </div>
 <div id="overlay">
   <div id="status">Loading model…</div>
+  <div id="panel">
+    <label>
+      <span class="row"><span>Model</span></span>
+      <select id="model-select"></select>
+    </label>
+    <label>
+      <span class="row"><span>Scale</span><span id="scale-val">1.00×</span></span>
+      <input id="scale-slider" type="range" min="0.1" max="3" step="0.05" value="1">
+    </label>
+    <label>
+      <span class="row"><span>Rotate Y</span><span id="rot-val">0°</span></span>
+      <input id="rot-slider" type="range" min="-180" max="180" step="1" value="0">
+    </label>
+    <button id="reset-btn" class="ghost" type="button">Reset placement</button>
+  </div>
 </div>
 <script type="module">
 import * as THREE from 'three';
@@ -125,10 +159,20 @@ import {{ ARButton }} from 'three/addons/webxr/ARButton.js';
 import {{ GLTFLoader }} from 'three/addons/loaders/GLTFLoader.js';
 import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
 
-const SCENE_ID = {scene_id_js};
-const MODEL_URL = `/ar/${{SCENE_ID}}/model.glb`;
+// Mutable so the model dropdown can swap the active asset without a
+// page reload. Initial value baked at render time from the route.
+let SCENE_ID = {scene_id_js};
+const modelUrlFor = (id) => `/ar/${{id}}/model.glb`;
 const statusEl = document.getElementById('status');
 const setStatus = (m) => {{ statusEl.textContent = m; }};
+
+// Single source of truth for all configurable parameters. Sliders +
+// future touch gestures write here; the render loop applies on every
+// frame so changes show up instantly on preview and placed instances.
+const state = {{
+  scale: 1.0,
+  rotationY: 0,  // radians
+}};
 
 const renderer = new THREE.WebGLRenderer({{ alpha: true, antialias: true }});
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -168,17 +212,109 @@ const loader = new GLTFLoader();
 let modelTemplate = null;
 let previewClone = null;
 let placedModel = null;
-loader.load(
-  MODEL_URL,
-  (gltf) => {{
-    modelTemplate = gltf.scene;
-    previewClone = modelTemplate.clone();
-    scene.add(previewClone);
-    setStatus('Tap "START AR" to place in your space.');
-  }},
-  undefined,
-  (err) => setStatus('Failed to load model: ' + (err.message || err))
-);
+
+function applyState(obj) {{
+  if (!obj) return;
+  obj.scale.setScalar(state.scale);
+  obj.rotation.y = state.rotationY;
+}}
+
+function loadModel(sceneId, {{ initial = false }} = {{}}) {{
+  SCENE_ID = sceneId;
+  setStatus('Loading model…');
+  if (placedModel) {{ scene.remove(placedModel); placedModel = null; }}
+  if (previewClone) {{ scene.remove(previewClone); previewClone = null; }}
+  modelTemplate = null;
+  loader.load(
+    modelUrlFor(sceneId),
+    (gltf) => {{
+      modelTemplate = gltf.scene;
+      previewClone = modelTemplate.clone();
+      applyState(previewClone);
+      scene.add(previewClone);
+      setStatus(initial
+        ? 'Tap "START AR" to place in your space.'
+        : `Loaded ${{sceneId}}.`);
+      if (!initial) {{
+        // Keep the URL in sync so reload reflects current selection.
+        history.replaceState(null, '', `/ar/${{sceneId}}/live`);
+        document.title = `Live AR — ${{sceneId}}`;
+      }}
+    }},
+    undefined,
+    (err) => setStatus('Failed to load model: ' + (err.message || err))
+  );
+}}
+
+loadModel(SCENE_ID, {{ initial: true }});
+
+// HUD wiring
+const modelSelect = document.getElementById('model-select');
+const scaleSlider = document.getElementById('scale-slider');
+const scaleVal = document.getElementById('scale-val');
+const rotSlider = document.getElementById('rot-slider');
+const rotVal = document.getElementById('rot-val');
+const resetBtn = document.getElementById('reset-btn');
+
+scaleSlider.addEventListener('input', () => {{
+  state.scale = parseFloat(scaleSlider.value);
+  scaleVal.textContent = state.scale.toFixed(2) + '×';
+  applyState(previewClone);
+  applyState(placedModel);
+}});
+
+rotSlider.addEventListener('input', () => {{
+  const deg = parseFloat(rotSlider.value);
+  state.rotationY = deg * Math.PI / 180;
+  rotVal.textContent = deg + '°';
+  applyState(previewClone);
+  applyState(placedModel);
+}});
+
+resetBtn.addEventListener('click', () => {{
+  if (placedModel) {{ scene.remove(placedModel); placedModel = null; }}
+  setStatus('Placement cleared.');
+}});
+
+// Populate the model dropdown from the catalog API. Falls back to the
+// current scene as the only option if the API fetch fails.
+fetch('/api/catalog')
+  .then((r) => r.ok ? r.json() : [])
+  .then((entries) => {{
+    if (!Array.isArray(entries) || entries.length === 0) {{
+      const opt = document.createElement('option');
+      opt.value = SCENE_ID; opt.textContent = SCENE_ID; opt.selected = true;
+      modelSelect.appendChild(opt);
+      return;
+    }}
+    // Group by category for clearer browsing.
+    const groups = new Map();
+    entries.forEach((e) => {{
+      if (!groups.has(e.category)) groups.set(e.category, []);
+      groups.get(e.category).push(e);
+    }});
+    for (const [category, items] of groups) {{
+      const group = document.createElement('optgroup');
+      group.label = category;
+      items.forEach((entry) => {{
+        const opt = document.createElement('option');
+        opt.value = entry.id;
+        opt.textContent = entry.name;
+        if (entry.id === SCENE_ID) opt.selected = true;
+        group.appendChild(opt);
+      }});
+      modelSelect.appendChild(group);
+    }}
+  }})
+  .catch(() => {{
+    const opt = document.createElement('option');
+    opt.value = SCENE_ID; opt.textContent = SCENE_ID; opt.selected = true;
+    modelSelect.appendChild(opt);
+  }});
+
+modelSelect.addEventListener('change', () => {{
+  loadModel(modelSelect.value);
+}});
 
 // ARButton injects itself into the DOM and manages session start/end.
 const arButton = ARButton.createButton(renderer, {{
@@ -217,8 +353,9 @@ controller.addEventListener('select', () => {{
   if (placedModel) scene.remove(placedModel);
   placedModel = modelTemplate.clone();
   placedModel.position.setFromMatrixPosition(reticle.matrix);
+  applyState(placedModel);
   scene.add(placedModel);
-  setStatus('Placed. Tap again to move it.');
+  setStatus('Placed. Adjust with the panel; tap to relocate.');
 }});
 scene.add(controller);
 

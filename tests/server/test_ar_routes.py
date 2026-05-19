@@ -172,7 +172,9 @@ class TestLivePage:
         # string literal so the regex-safe scene_id is delivered as
         # `"live2"` in the JS source.
         assert '"live2"' in body
-        assert "/${SCENE_ID}/model.glb" in body or "/live2/model.glb" in body
+        # GLB URL is built via the modelUrlFor() helper now so the
+        # dropdown can swap models live without a page reload.
+        assert "/ar/${id}/model.glb" in body or "/live2/model.glb" in body
 
     def test_returns_404_for_unknown_scene(self, client: TestClient) -> None:
         r = client.get("/ar/nope/live")
@@ -197,3 +199,51 @@ class TestViewerLinksToLive:
         _seed_scene(store, "linked")
         body = client.get("/ar/linked").text
         assert 'href="/ar/linked/live"' in body
+
+
+class TestLivePageHud:
+    """Phase 6.B — configurable controls (HUD) on the live page."""
+
+    def test_panel_includes_model_dropdown(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        _seed_scene(store, "demo")
+        body = client.get("/ar/demo/live").text
+        assert 'id="model-select"' in body
+        # The dropdown is populated client-side from /api/catalog.
+        assert "/api/catalog" in body
+
+    def test_panel_includes_scale_slider(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        _seed_scene(store, "demo")
+        body = client.get("/ar/demo/live").text
+        assert 'id="scale-slider"' in body
+        assert 'type="range"' in body
+        assert 'state.scale' in body
+
+    def test_panel_includes_rotation_slider(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        _seed_scene(store, "demo")
+        body = client.get("/ar/demo/live").text
+        assert 'id="rot-slider"' in body
+        assert 'state.rotationY' in body
+
+    def test_panel_includes_reset_button(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        _seed_scene(store, "demo")
+        body = client.get("/ar/demo/live").text
+        assert 'id="reset-btn"' in body
+
+    def test_loadmodel_helper_swaps_url(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        # When the user picks a different model from the dropdown,
+        # the URL is updated via history.replaceState so a refresh
+        # reflects the current selection.
+        _seed_scene(store, "demo")
+        body = client.get("/ar/demo/live").text
+        assert "history.replaceState" in body
+        assert "loadModel" in body
