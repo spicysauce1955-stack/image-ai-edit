@@ -54,7 +54,7 @@ from ..pipeline.insert import (
     DEFAULT_REFINE_PROMPT,
 )
 from .ar_routes import build_ar_router
-from .catalog_routes import build_catalog_router
+from .catalog_routes import build_catalog_api_router, build_catalog_browse_router
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_AR_ROOT = Path.cwd() / "out" / "scenes"
@@ -238,8 +238,14 @@ def create_app(
     load_env()
     app = FastAPI(title="image-ai-edit", version="0.1.0")
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-    app.include_router(build_ar_router(ar_store or FilesystemARStore(DEFAULT_AR_ROOT)))
-    app.include_router(build_catalog_router(catalog or AssetCatalog.load()))
+    # ``or`` is wrong here — an empty AssetCatalog is falsy (it
+    # defines __len__), which would silently fall back to the on-disk
+    # manifest. Use explicit ``is None`` checks for both.
+    ar_store_instance = ar_store if ar_store is not None else FilesystemARStore(DEFAULT_AR_ROOT)
+    catalog_instance = catalog if catalog is not None else AssetCatalog.load()
+    app.include_router(build_ar_router(ar_store_instance))
+    app.include_router(build_catalog_api_router(catalog_instance))
+    app.include_router(build_catalog_browse_router(catalog_instance))
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
