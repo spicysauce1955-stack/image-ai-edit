@@ -21,6 +21,7 @@ from ai_edit.pipeline.catalog_fetch import (
     format_summary,
     select_entries,
 )
+from tests.conftest import minimal_glb_bytes, minimal_usdz_bytes
 
 
 def _entry(
@@ -53,24 +54,29 @@ def _client(handler) -> httpx.Client:
 
 class TestFetchEntry:
     def test_writes_glb_bytes_to_store(self, tmp_path: Path) -> None:
+        glb = minimal_glb_bytes()
+
         def handler(request: httpx.Request) -> httpx.Response:
             assert str(request.url) == "https://example.invalid/x.glb"
-            return httpx.Response(200, content=b"GLB-BYTES-HERE")
+            return httpx.Response(200, content=glb)
 
         store = FilesystemARStore(tmp_path)
         with _client(handler) as client:
             result = fetch_entry(_entry(), store, client=client)
 
-        assert result.glb.bytes_written == len(b"GLB-BYTES-HERE")
+        assert result.glb.bytes_written == len(glb)
         assert result.glb.error is None
-        assert store.get("test", MIME_GLB) == b"GLB-BYTES-HERE"
+        assert store.get("test", MIME_GLB) == glb
 
     def test_writes_both_glb_and_usdz(self, tmp_path: Path) -> None:
+        glb = minimal_glb_bytes()
+        usdz = minimal_usdz_bytes()
+
         def handler(request: httpx.Request) -> httpx.Response:
             if str(request.url).endswith(".glb"):
-                return httpx.Response(200, content=b"GLB")
+                return httpx.Response(200, content=glb)
             if str(request.url).endswith(".usdz"):
-                return httpx.Response(200, content=b"USDZ")
+                return httpx.Response(200, content=usdz)
             return httpx.Response(404)
 
         store = FilesystemARStore(tmp_path)
@@ -81,10 +87,10 @@ class TestFetchEntry:
                 client=client,
             )
 
-        assert result.glb.bytes_written == 3
-        assert result.usdz.bytes_written == 4
-        assert store.get("test", MIME_GLB) == b"GLB"
-        assert store.get("test", MIME_USDZ) == b"USDZ"
+        assert result.glb.bytes_written == len(glb)
+        assert result.usdz.bytes_written == len(usdz)
+        assert store.get("test", MIME_GLB) == glb
+        assert store.get("test", MIME_USDZ) == usdz
 
     def test_404_on_glb_records_error_but_does_not_raise(
         self, tmp_path: Path
@@ -105,9 +111,11 @@ class TestFetchEntry:
     def test_usdz_failure_does_not_block_glb(self, tmp_path: Path) -> None:
         # A common real-world scenario: source has GLB but USDZ URL is
         # stale. GLB must still land successfully.
+        glb = minimal_glb_bytes()
+
         def handler(request: httpx.Request) -> httpx.Response:
             if str(request.url).endswith(".glb"):
-                return httpx.Response(200, content=b"GLB")
+                return httpx.Response(200, content=glb)
             return httpx.Response(404)
 
         store = FilesystemARStore(tmp_path)
@@ -121,12 +129,30 @@ class TestFetchEntry:
         assert result.glb.ok
         assert not result.usdz.ok
         assert result.usdz.error is not None
-        assert store.get("test", MIME_GLB) == b"GLB"
+        assert store.get("test", MIME_GLB) == glb
         assert store.get("test", MIME_USDZ) is None
 
-    def test_no_url_marks_skipped_not_error(self, tmp_path: Path) -> None:
+    def test_invalid_glb_bytes_caught_by_validator(self, tmp_path: Path) -> None:
+        # New in Phase 4.C: a 200 response with bytes that aren't a
+        # real GLB (e.g. Cloudflare HTML error page) must NOT land in
+        # the store. The validator surfaces the failure in the result.
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, content=b"GLB")
+            return httpx.Response(200, content=b"<!doctype html><h1>404</h1>")
+
+        store = FilesystemARStore(tmp_path)
+        with _client(handler) as client:
+            result = fetch_entry(_entry(), store, client=client)
+
+        assert result.glb.bytes_written is None
+        assert result.glb.error is not None
+        assert "magic mismatch" in result.glb.error or "AssetValidationError" in result.glb.error
+        assert store.get("test", MIME_GLB) is None  # crucially: not written
+
+    def test_no_url_marks_skipped_not_error(self, tmp_path: Path) -> None:
+        glb = minimal_glb_bytes()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=glb)
 
         store = FilesystemARStore(tmp_path)
         with _client(handler) as client:
@@ -149,10 +175,12 @@ class TestFetchEntry:
 
         calls: dict[str, object] = {}
 
+        fake_bundle_bytes = minimal_glb_bytes()
+
         def fake_bundle(gltf_url: str, *, client, rewriter):
             calls["gltf_url"] = gltf_url
             calls["rewriter"] = rewriter
-            return b"FAKE-BUNDLED-GLB"
+            return fake_bundle_bytes
 
         monkeypatch.setattr(catalog_fetch, "bundle_remote_gltf", fake_bundle)
 
@@ -188,8 +216,8 @@ class TestFetchEntry:
 
         assert calls["gltf_url"] == "https://example.invalid/x.gltf"
         assert calls["rewriter"] is poly_haven_rewriter
-        assert result.glb.bytes_written == len(b"FAKE-BUNDLED-GLB")
-        assert store.get("ph_test", MIME_GLB) == b"FAKE-BUNDLED-GLB"
+        assert result.glb.bytes_written == len(fake_bundle_bytes)
+        assert store.get("ph_test", MIME_GLB) == fake_bundle_bytes
 
 
 class TestSelectEntries:
@@ -212,8 +240,10 @@ class TestSelectEntries:
 
 class TestFetchAll:
     def test_fetches_every_entry(self, tmp_path: Path) -> None:
+        glb = minimal_glb_bytes()
+
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, content=b"x")
+            return httpx.Response(200, content=glb)
 
         store = FilesystemARStore(tmp_path)
         catalog = AssetCatalog([_entry(id="a"), _entry(id="b")])

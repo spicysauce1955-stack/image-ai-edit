@@ -19,6 +19,7 @@ from ..models.base import MIME_GLB, MIME_USDZ, Scene3DAsset
 from .ar_store import ARStore
 from .asset_bundle import bundle_remote_gltf, get_rewriter
 from .asset_catalog import AssetCatalog, AssetCatalogEntry
+from .asset_validate import validate_glb, validate_usdz
 
 DEFAULT_TIMEOUT_S = 60
 
@@ -89,6 +90,9 @@ def fetch_entry(
     if entry.glb_url:
         try:
             data = _download(client, entry.glb_url)
+            # Validate BEFORE writing to the store. Fail-closed:
+            # invalid bytes never become a 200 on /ar/<id>/model.glb.
+            validate_glb(data)
             store.put(
                 entry.id,
                 Scene3DAsset(data=data, mime_type=MIME_GLB, extension=".glb"),
@@ -102,6 +106,7 @@ def fetch_entry(
             data = bundle_remote_gltf(
                 entry.glb_bundle.gltf_url, client=client, rewriter=rewriter
             )
+            validate_glb(data)
             store.put(
                 entry.id,
                 Scene3DAsset(data=data, mime_type=MIME_GLB, extension=".glb"),
@@ -115,6 +120,7 @@ def fetch_entry(
     if entry.usdz_url:
         try:
             data = _download(client, entry.usdz_url)
+            validate_usdz(data)
             store.put(
                 entry.id,
                 Scene3DAsset(data=data, mime_type=MIME_USDZ, extension=".usdz"),
