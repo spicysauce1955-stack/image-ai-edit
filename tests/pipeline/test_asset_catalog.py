@@ -52,11 +52,38 @@ class TestAssetCatalogEntry:
         with pytest.raises(ValueError, match="invalid"):
             AssetCatalogEntry.from_dict(_minimal_raw_entry(id="bad id!"))
 
-    def test_from_dict_rejects_no_asset_url(self) -> None:
-        # An entry with neither GLB nor USDZ is useless — the route
-        # would 404 on both asset paths.
-        with pytest.raises(ValueError, match="at least one asset URL"):
+    def test_from_dict_rejects_no_asset_source(self) -> None:
+        # An entry with no GLB, USDZ, or bundle source is useless —
+        # the route would 404 on both asset paths.
+        with pytest.raises(ValueError, match="at least one asset source"):
             AssetCatalogEntry.from_dict(_minimal_raw_entry(glb_url=None, usdz_url=None))
+
+    def test_from_dict_accepts_bundle_only(self) -> None:
+        # A Poly Haven-style entry has no direct glb_url, just a
+        # bundle source that the fetcher will turn into a GLB.
+        raw = _minimal_raw_entry(
+            glb_url=None,
+            usdz_url=None,
+            glb_bundle={"gltf_url": "https://example.invalid/x.gltf", "rewriter": "poly_haven"},
+        )
+        entry = AssetCatalogEntry.from_dict(raw)
+        assert entry.glb_bundle is not None
+        assert entry.glb_bundle.gltf_url == "https://example.invalid/x.gltf"
+        assert entry.glb_bundle.rewriter == "poly_haven"
+
+    def test_from_dict_rejects_glb_url_and_bundle_together(self) -> None:
+        raw = _minimal_raw_entry(
+            glb_url="https://example.invalid/x.glb",
+            glb_bundle={"gltf_url": "https://example.invalid/x.gltf"},
+        )
+        with pytest.raises(ValueError, match="both glb_url and glb_bundle"):
+            AssetCatalogEntry.from_dict(raw)
+
+    def test_bundle_from_dict_requires_gltf_url(self) -> None:
+        from ai_edit.pipeline.asset_catalog import GlbBundleSource
+
+        with pytest.raises(ValueError, match="gltf_url"):
+            GlbBundleSource.from_dict({"rewriter": "poly_haven"})
 
     def test_from_dict_accepts_usdz_only(self) -> None:
         # iOS-only entries (Apple AR Quick Look gallery) ship USDZ but

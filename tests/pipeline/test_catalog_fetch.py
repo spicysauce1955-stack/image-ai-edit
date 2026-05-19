@@ -138,6 +138,59 @@ class TestFetchEntry:
         assert result.usdz.error is None  # skipped, not errored
         assert result.usdz.skipped_reason is not None
 
+    def test_bundle_source_routes_through_bundler(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # When an entry has glb_bundle (no glb_url), the fetcher must
+        # call into the bundler rather than trying a direct GET on a
+        # non-existent glb_url. Verify by stubbing bundle_remote_gltf.
+        from ai_edit.pipeline import catalog_fetch
+        from ai_edit.pipeline.asset_bundle import poly_haven_rewriter
+
+        calls: dict[str, object] = {}
+
+        def fake_bundle(gltf_url: str, *, client, rewriter):
+            calls["gltf_url"] = gltf_url
+            calls["rewriter"] = rewriter
+            return b"FAKE-BUNDLED-GLB"
+
+        monkeypatch.setattr(catalog_fetch, "bundle_remote_gltf", fake_bundle)
+
+        entry = AssetCatalogEntry.from_dict(
+            {
+                "id": "ph_test",
+                "name": "Poly Haven Test",
+                "category": "outdoor",
+                "description": "",
+                "glb_url": None,
+                "usdz_url": None,
+                "thumbnail_url": None,
+                "license": "CC0-1.0",
+                "attribution": "",
+                "source_url": "https://example.invalid",
+                "scale_hint": None,
+                "glb_bundle": {
+                    "gltf_url": "https://example.invalid/x.gltf",
+                    "rewriter": "poly_haven",
+                },
+            }
+        )
+
+        store = FilesystemARStore(tmp_path)
+        # The httpx client isn't actually used because fake_bundle
+        # short-circuits — but the fetcher creates one, so give it
+        # something inert.
+        def handler(_: httpx.Request) -> httpx.Response:  # pragma: no cover
+            return httpx.Response(500)
+
+        with _client(handler) as client:
+            result = fetch_entry(entry, store, client=client)
+
+        assert calls["gltf_url"] == "https://example.invalid/x.gltf"
+        assert calls["rewriter"] is poly_haven_rewriter
+        assert result.glb.bytes_written == len(b"FAKE-BUNDLED-GLB")
+        assert store.get("ph_test", MIME_GLB) == b"FAKE-BUNDLED-GLB"
+
 
 class TestSelectEntries:
     def _catalog(self) -> AssetCatalog:

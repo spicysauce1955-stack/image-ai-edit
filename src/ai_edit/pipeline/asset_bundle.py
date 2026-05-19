@@ -25,9 +25,73 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urljoin
 
 import httpx
+
+# A URL rewriter takes the relative URI as written in the .gltf plus
+# the base URL of the .gltf (its parent directory, with trailing
+# slash) and returns the absolute URL to fetch the resource from.
+# Returning the urljoin of the two arguments is the identity / default
+# rewriter — see :data:`default_rewriter`.
+UrlRewriter = Callable[[str, str], str]
+
+
+def default_rewriter(relative_uri: str, base_url: str) -> str:
+    """Resolve ``relative_uri`` against ``base_url`` (the .gltf's parent).
+
+    This is the well-behaved-source rewriter — used by any catalog
+    entry that doesn't override. Khronos Box.gltf and friends work
+    with this rewriter unchanged.
+    """
+    return urljoin(base_url, relative_uri)
+
+
+def poly_haven_rewriter(relative_uri: str, base_url: str) -> str:
+    """Rewrite a relative ref into its actual Poly Haven CDN URL.
+
+    Poly Haven's .gltf assumes textures live at ``textures/<filename>``
+    next to the .gltf, but the CDN serves them in a parallel
+    ``<root>/<ext>/<res>/<slug>/<filename>`` tree. ``.bin`` files do
+    live next to the .gltf and need no rewrite.
+
+    Path shape::
+
+        .gltf:    .../Models/gltf/<res>/<slug>/<slug>_<res>.gltf
+        .bin:     .../Models/gltf/<res>/<slug>/<slug>.bin          (default urljoin works)
+        texture:  .../Models/<ext>/<res>/<slug>/<filename>.<ext>   (rewrite needed)
+    """
+    if not relative_uri.startswith("textures/"):
+        return default_rewriter(relative_uri, base_url)
+    filename = relative_uri[len("textures/"):]
+    # File extension drives the CDN sub-tree (`/jpg/`, `/png/`, `/exr/`).
+    ext = filename.rsplit(".", 1)[-1].lower()
+    new_base = base_url.replace("/Models/gltf/", f"/Models/{ext}/", 1)
+    return new_base + filename
+
+
+# Registry of named rewriters. The catalog manifest references these
+# by name (``"poly_haven"``) so JSON entries stay declarative.
+REWRITERS: dict[str, UrlRewriter] = {
+    "default": default_rewriter,
+    "poly_haven": poly_haven_rewriter,
+}
+
+
+def get_rewriter(name: str | None) -> UrlRewriter:
+    """Look up a rewriter by name. ``None`` returns the default.
+
+    Raises :class:`KeyError` for unknown names — keeps catalog typos
+    loud.
+    """
+    if name is None:
+        return default_rewriter
+    if name not in REWRITERS:
+        raise KeyError(
+            f"unknown url rewriter {name!r}; known: {sorted(REWRITERS)}"
+        )
+    return REWRITERS[name]
 
 
 def _require_pygltflib():
@@ -81,12 +145,20 @@ def download_gltf_assembly(
     dest_dir: Path,
     *,
     client: httpx.Client,
+    rewriter: UrlRewriter | None = None,
 ) -> Path:
     """Download the ``.gltf`` JSON and every external resource it
     references into ``dest_dir``, preserving relative paths.
 
+    The optional ``rewriter`` adapts a relative URI to its actual
+    fetch URL — useful for sources like Poly Haven that ship .gltf
+    files whose paths don't resolve naively against the file's own
+    URL. Defaults to :func:`default_rewriter` (plain urljoin).
+
     Returns the path of the downloaded ``.gltf`` file.
     """
+    rewriter = rewriter or default_rewriter
+
     gltf_response = client.get(gltf_url)
     gltf_response.raise_for_status()
     gltf_json = gltf_response.json()
@@ -101,7 +173,10 @@ def download_gltf_assembly(
 
     base = gltf_url.rsplit("/", 1)[0] + "/"
     for relative in discover_external_refs(gltf_json):
-        _download_to(client, urljoin(base, relative), dest_dir / relative)
+        # Save at the relative path so pygltflib can find the file
+        # where the .gltf expects it. Fetch from whatever the rewriter
+        # says is the real URL.
+        _download_to(client, rewriter(relative, base), dest_dir / relative)
 
     return gltf_path
 
@@ -117,10 +192,17 @@ def assemble_to_glb(gltf_path: Path) -> bytes:
     pygltflib = _require_pygltflib()
 
     gltf = pygltflib.GLTF2().load(str(gltf_path))
-    # Pull every external image into a bufferView and every external
-    # buffer into the GLB's binary blob. After these two calls the
-    # in-memory glTF has no external references left.
-    gltf.convert_images(pygltflib.ImageFormat.BUFFERVIEW)
+    # Inline every external image as a base64 data URI and pull every
+    # external buffer into the GLB's binary blob. After these two
+    # calls the in-memory glTF has no external references left.
+    #
+    # We use ``DATAURI`` for images even though ``BUFFERVIEW`` would
+    # be more space-efficient — pygltflib's BUFFERVIEW conversion is
+    # documented as broken for image data (silently no-ops; see
+    # https://gitlab.com/dodgyville/pygltflib/issues for the upstream
+    # bug). DATAURI roughly 33%-inflates image bytes via base64 but
+    # produces a fully self-contained GLB that model-viewer accepts.
+    gltf.convert_images(pygltflib.ImageFormat.DATAURI)
     gltf.convert_buffers(pygltflib.BufferFormat.BINARYBLOB)
 
     glb_path = gltf_path.parent / "_bundled.glb"
@@ -132,6 +214,7 @@ def bundle_remote_gltf(
     gltf_url: str,
     *,
     client: httpx.Client,
+    rewriter: UrlRewriter | None = None,
 ) -> bytes:
     """Download ``gltf_url`` + its external resources, return a
     self-contained GLB.
@@ -141,5 +224,7 @@ def bundle_remote_gltf(
     directory that's cleaned up before this function returns.
     """
     with tempfile.TemporaryDirectory(prefix="ai-edit-bundle-") as tmp:
-        gltf_path = download_gltf_assembly(gltf_url, Path(tmp), client=client)
+        gltf_path = download_gltf_assembly(
+            gltf_url, Path(tmp), client=client, rewriter=rewriter
+        )
         return assemble_to_glb(gltf_path)

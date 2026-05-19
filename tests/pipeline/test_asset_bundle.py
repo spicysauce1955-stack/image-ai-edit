@@ -16,8 +16,12 @@ import httpx
 import pytest
 
 from ai_edit.pipeline.asset_bundle import (
+    REWRITERS,
+    default_rewriter,
     discover_external_refs,
     download_gltf_assembly,
+    get_rewriter,
+    poly_haven_rewriter,
 )
 
 
@@ -156,6 +160,121 @@ class TestDownloadGltfAssembly:
                 download_gltf_assembly(
                     "https://example.invalid/model.gltf", tmp_path, client=client
                 )
+
+
+# -- URL rewriters ----------------------------------------------------------
+
+
+class TestDefaultRewriter:
+    def test_simple_urljoin(self) -> None:
+        assert (
+            default_rewriter("model.bin", "https://example.invalid/path/")
+            == "https://example.invalid/path/model.bin"
+        )
+
+    def test_subdir_relative(self) -> None:
+        assert (
+            default_rewriter("textures/x.png", "https://example.invalid/path/")
+            == "https://example.invalid/path/textures/x.png"
+        )
+
+
+class TestPolyHavenRewriter:
+    BASE = "https://dl.polyhaven.org/file/ph-assets/Models/gltf/1k/planter_box_01/"
+
+    def test_bin_uses_default_path(self) -> None:
+        # .bin lives next to the .gltf at the natural relative path.
+        assert (
+            poly_haven_rewriter("planter_box_01.bin", self.BASE)
+            == self.BASE + "planter_box_01.bin"
+        )
+
+    def test_texture_jpg_rewrites_to_jpg_tree(self) -> None:
+        # textures/<filename>.jpg → /Models/jpg/<res>/<slug>/<filename>.jpg
+        assert poly_haven_rewriter(
+            "textures/planter_box_01_diff_1k.jpg", self.BASE
+        ) == (
+            "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/"
+            "planter_box_01/planter_box_01_diff_1k.jpg"
+        )
+
+    def test_texture_png_rewrites_to_png_tree(self) -> None:
+        # Files extension drives the CDN sub-tree.
+        assert poly_haven_rewriter(
+            "textures/foo_diff_1k.png", self.BASE
+        ) == (
+            "https://dl.polyhaven.org/file/ph-assets/Models/png/1k/"
+            "planter_box_01/foo_diff_1k.png"
+        )
+
+    def test_2k_resolution_preserved(self) -> None:
+        base_2k = self.BASE.replace("/1k/", "/2k/")
+        assert poly_haven_rewriter(
+            "textures/x_diff_2k.jpg", base_2k
+        ) == (
+            "https://dl.polyhaven.org/file/ph-assets/Models/jpg/2k/"
+            "planter_box_01/x_diff_2k.jpg"
+        )
+
+    def test_unknown_relative_falls_back_to_default(self) -> None:
+        # Anything not under textures/ uses the default rewriter so
+        # we don't accidentally mangle absolute URLs or unusual refs.
+        assert (
+            poly_haven_rewriter("scene.bin", self.BASE)
+            == self.BASE + "scene.bin"
+        )
+
+
+class TestRewriterRegistry:
+    def test_none_returns_default(self) -> None:
+        assert get_rewriter(None) is default_rewriter
+
+    def test_named_returns_registered(self) -> None:
+        assert get_rewriter("poly_haven") is poly_haven_rewriter
+        assert get_rewriter("default") is default_rewriter
+
+    def test_unknown_raises(self) -> None:
+        with pytest.raises(KeyError, match="unknown url rewriter"):
+            get_rewriter("nope")
+
+    def test_registry_contains_both(self) -> None:
+        assert "default" in REWRITERS
+        assert "poly_haven" in REWRITERS
+
+
+class TestDownloadWithRewriter:
+    def test_rewriter_redirects_fetch_url(self, tmp_path: Path) -> None:
+        # Verifies the integration: even though the .gltf claims
+        # textures/x.jpg, we should fetch from a remapped URL but
+        # *save* to the original relative path so pygltflib finds it.
+        gltf_json = {"images": [{"uri": "textures/x.jpg"}]}
+
+        fetched: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            fetched.append(url)
+            if url.endswith(".gltf"):
+                return httpx.Response(200, json=gltf_json)
+            if url.endswith("REWRITTEN/x.jpg"):
+                return httpx.Response(200, content=b"texture-bytes")
+            return httpx.Response(404, content=b"wrong url: " + url.encode())
+
+        def rewriter(rel: str, base: str) -> str:
+            return base + "REWRITTEN/" + rel.split("/")[-1]
+
+        with _client(handler) as client:
+            download_gltf_assembly(
+                "https://example.invalid/path/model.gltf",
+                tmp_path,
+                client=client,
+                rewriter=rewriter,
+            )
+
+        # The texture landed at the path the .gltf expects, with the
+        # bytes from the rewritten URL.
+        assert (tmp_path / "textures" / "x.jpg").read_bytes() == b"texture-bytes"
+        assert any("REWRITTEN" in u for u in fetched)
 
 
 # -- Integration test (network-gated) ---------------------------------------

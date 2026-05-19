@@ -55,6 +55,29 @@ def default_path() -> Path:
 
 
 @dataclass(frozen=True)
+class GlbBundleSource:
+    """Bundle a remote .gltf + textures into a self-contained .glb.
+
+    Used by entries whose source ships unbundled (Poly Haven, etc.).
+    ``rewriter`` names a strategy registered in
+    :mod:`asset_bundle.REWRITERS` (e.g. ``"poly_haven"``); ``None``
+    selects the default urljoin-based rewriter.
+    """
+
+    gltf_url: str
+    rewriter: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"gltf_url": self.gltf_url, "rewriter": self.rewriter}
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> GlbBundleSource:
+        if "gltf_url" not in raw:
+            raise ValueError("glb_bundle missing required 'gltf_url'")
+        return cls(gltf_url=raw["gltf_url"], rewriter=raw.get("rewriter"))
+
+
+@dataclass(frozen=True)
 class AssetCatalogEntry:
     """One row in the catalog manifest.
 
@@ -64,8 +87,13 @@ class AssetCatalogEntry:
     :data:`ar_store.SCENE_ID_PATTERN` — enforced at load time so a bad
     manifest fails fast.
 
-    At least one of ``glb_url`` / ``usdz_url`` must be present;
-    otherwise the entry serves no purpose.
+    At least one of ``glb_url`` / ``usdz_url`` / ``glb_bundle`` must be
+    present; otherwise the entry serves no purpose.
+
+    ``glb_bundle`` is mutually exclusive with ``glb_url``: when set, the
+    fetcher pulls the .gltf + textures through the bundler and writes
+    the resulting self-contained GLB to the store, so there's no
+    separate "direct" GLB URL.
 
     ``scale_hint`` is a multiplier the AR client may apply to bring the
     model to real-world scale (1.0 means "model is already authored at
@@ -83,6 +111,7 @@ class AssetCatalogEntry:
     attribution: str
     source_url: str
     scale_hint: float | None = None
+    glb_bundle: GlbBundleSource | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize as the JSON manifest row.
@@ -102,6 +131,7 @@ class AssetCatalogEntry:
             "attribution": self.attribution,
             "source_url": self.source_url,
             "scale_hint": self.scale_hint,
+            "glb_bundle": self.glb_bundle.to_dict() if self.glb_bundle else None,
         }
 
     @classmethod
@@ -125,10 +155,18 @@ class AssetCatalogEntry:
 
         glb = raw.get("glb_url")
         usdz = raw.get("usdz_url")
-        if not glb and not usdz:
+        bundle_raw = raw.get("glb_bundle")
+        bundle = GlbBundleSource.from_dict(bundle_raw) if bundle_raw else None
+
+        if glb and bundle:
             raise ValueError(
-                f"Catalog entry {entry_id!r} has neither glb_url nor usdz_url; "
-                f"at least one asset URL is required."
+                f"Catalog entry {entry_id!r} has both glb_url and glb_bundle; "
+                f"choose one — glb_bundle generates the GLB itself."
+            )
+        if not glb and not usdz and not bundle:
+            raise ValueError(
+                f"Catalog entry {entry_id!r} has none of glb_url / usdz_url / glb_bundle; "
+                f"at least one asset source is required."
             )
 
         return cls(
@@ -143,6 +181,7 @@ class AssetCatalogEntry:
             attribution=raw.get("attribution", ""),
             source_url=raw["source_url"],
             scale_hint=raw.get("scale_hint"),
+            glb_bundle=bundle,
         )
 
 

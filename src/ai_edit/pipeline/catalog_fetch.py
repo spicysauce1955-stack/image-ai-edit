@@ -17,6 +17,7 @@ import httpx
 
 from ..models.base import MIME_GLB, MIME_USDZ, Scene3DAsset
 from .ar_store import ARStore
+from .asset_bundle import bundle_remote_gltf, get_rewriter
 from .asset_catalog import AssetCatalog, AssetCatalogEntry
 
 DEFAULT_TIMEOUT_S = 60
@@ -95,8 +96,21 @@ def fetch_entry(
             result.glb.bytes_written = len(data)
         except Exception as exc:  # noqa: BLE001 — capture everything for the report
             result.glb.error = f"{type(exc).__name__}: {exc}"
+    elif entry.glb_bundle:
+        try:
+            rewriter = get_rewriter(entry.glb_bundle.rewriter)
+            data = bundle_remote_gltf(
+                entry.glb_bundle.gltf_url, client=client, rewriter=rewriter
+            )
+            store.put(
+                entry.id,
+                Scene3DAsset(data=data, mime_type=MIME_GLB, extension=".glb"),
+            )
+            result.glb.bytes_written = len(data)
+        except Exception as exc:  # noqa: BLE001 — capture for the report
+            result.glb.error = f"{type(exc).__name__}: {exc}"
     else:
-        result.glb.skipped_reason = "no glb_url in catalog"
+        result.glb.skipped_reason = "no glb_url or glb_bundle in catalog"
 
     if entry.usdz_url:
         try:
