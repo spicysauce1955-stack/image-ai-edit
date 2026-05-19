@@ -6,3 +6,8 @@ dist/
 build/
 .venv/
 out/
+
+# Tooling state — per-developer, not part of the project
+.claude/
+.superset/
+opencode.json
