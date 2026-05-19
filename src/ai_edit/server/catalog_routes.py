@@ -20,12 +20,15 @@ metadata + a thin browsing UI.
 from __future__ import annotations
 
 import html
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
 from ..pipeline.asset_catalog import AssetCatalog, AssetCatalogEntry
+
+_log = logging.getLogger("ai_edit.catalog")
 
 
 def _entry_to_payload(entry: Any) -> dict[str, Any]:
@@ -73,6 +76,7 @@ def build_catalog_api_router(catalog: AssetCatalog) -> APIRouter:
         """Return one entry's metadata or 404."""
         entry = catalog.get(asset_id)
         if entry is None:
+            _log.info("catalog.get status=404 id=%s", asset_id)
             raise HTTPException(
                 status_code=404, detail=f"Unknown catalog id: {asset_id}"
             )

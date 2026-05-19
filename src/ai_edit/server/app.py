@@ -55,6 +55,7 @@ from ..pipeline.insert import (
 )
 from .ar_routes import build_ar_router
 from .catalog_routes import build_catalog_api_router, build_catalog_browse_router
+from .logging_setup import setup_logging
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_AR_ROOT = Path.cwd() / "out" / "scenes"
@@ -236,6 +237,7 @@ def create_app(
     ``assets/catalog.json``.
     """
     load_env()
+    setup_logging()
     app = FastAPI(title="image-ai-edit", version="0.1.0")
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     # ``or`` is wrong here — an empty AssetCatalog is falsy (it

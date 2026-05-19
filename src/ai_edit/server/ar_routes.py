@@ -23,6 +23,7 @@ fresh :class:`ARStore` per test — see ``tests/server/test_ar_routes.py``.
 from __future__ import annotations
 
 import html
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path
@@ -30,6 +31,8 @@ from fastapi.responses import HTMLResponse, Response
 
 from ..models.base import MIME_GLB, MIME_USDZ
 from ..pipeline.ar_store import ARStore, SCENE_ID_PATTERN
+
+_log = logging.getLogger("ai_edit.ar")
 
 # A FastAPI Annotated alias so all three routes use the same validator
 # without repeating the regex.
@@ -111,7 +114,9 @@ def build_ar_router(store: ARStore) -> APIRouter:
         is a worse UX than a clean not-found.
         """
         if not store.exists(scene_id):
+            _log.info("ar.viewer status=404 scene=%s", scene_id)
             raise HTTPException(status_code=404, detail=f"Unknown scene: {scene_id}")
+        _log.info("ar.viewer status=200 scene=%s", scene_id)
         return HTMLResponse(_render_viewer_html(scene_id))
 
     @router.get("/{scene_id}/model.glb")
@@ -119,7 +124,9 @@ def build_ar_router(store: ARStore) -> APIRouter:
         """Serve the GLB bytes for ``scene_id``."""
         data = store.get(scene_id, MIME_GLB)
         if data is None:
+            _log.info("ar.glb status=404 scene=%s", scene_id)
             raise HTTPException(status_code=404, detail=f"No GLB for scene: {scene_id}")
+        _log.info("ar.glb status=200 scene=%s bytes=%d", scene_id, len(data))
         return Response(content=data, media_type=MIME_GLB)
 
     @router.get("/{scene_id}/model.usdz")
@@ -132,7 +139,9 @@ def build_ar_router(store: ARStore) -> APIRouter:
         """
         data = store.get(scene_id, MIME_USDZ)
         if data is None:
+            _log.info("ar.usdz status=404 scene=%s", scene_id)
             raise HTTPException(status_code=404, detail=f"No USDZ for scene: {scene_id}")
+        _log.info("ar.usdz status=200 scene=%s bytes=%d", scene_id, len(data))
         return Response(content=data, media_type=MIME_USDZ)
 
     return router
