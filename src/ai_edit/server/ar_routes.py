@@ -1,14 +1,18 @@
 """AR delivery routes.
 
-Phase 1 of the AR plan: serve a ``<model-viewer>`` HTML page plus the
-GLB and USDZ asset bytes from an :class:`ARStore`. No 3D generation
-here — that's Phase 2.
+Phase 1 + 6.A of the AR plan.
 
 Routes mounted under ``/ar``:
 
 ``GET /ar/{scene_id}``
-    HTML page wired with the model-viewer web component, including the
-    iOS Quick Look and Android Scene Viewer / WebXR handoffs.
+    Model-viewer HTML page wired for OS-delegated AR (Quick Look on
+    iOS, Scene Viewer on Android, WebXR where supported). Phase 1.
+
+``GET /ar/{scene_id}/live``
+    Three.js + WebXR page with ``immersive-ar`` + ``hit-test``: tap a
+    detected surface to place the model in your space. Browser stays
+    in our app the whole time — the OS native viewer is not invoked.
+    Phase 6.A.
 
 ``GET /ar/{scene_id}/model.glb``
     Serves the GLB bytes with ``model/gltf-binary``.
@@ -23,6 +27,7 @@ fresh :class:`ARStore` per test — see ``tests/server/test_ar_routes.py``.
 from __future__ import annotations
 
 import html
+import json
 import logging
 from typing import Annotated
 
@@ -37,6 +42,211 @@ _log = logging.getLogger("ai_edit.ar")
 # A FastAPI Annotated alias so all three routes use the same validator
 # without repeating the regex.
 SceneId = Annotated[str, Path(pattern=SCENE_ID_PATTERN)]
+
+
+# Pinned three.js version for the live AR page. Bumping is a deliberate
+# change — every three.js minor can shift WebXR / hit-test behaviour.
+_THREE_VERSION = "0.160.0"
+
+
+def _render_live_html(scene_id: str) -> str:
+    """Build the three.js + WebXR live placement page for ``scene_id``.
+
+    Loads the catalog entry's GLB through the existing
+    ``/ar/{scene_id}/model.glb`` route and enters an ``immersive-ar``
+    session with ``hit-test`` so the user can place the model on a
+    detected surface. ARButton handles the no-support fallback —
+    iOS Safari users see "AR not supported" and we keep the
+    Quick-Look-via-``/ar/{scene_id}`` path as the canonical iOS UX.
+    """
+    safe_id = html.escape(scene_id, quote=True)
+    safe_three = html.escape(_THREE_VERSION, quote=True)
+    # JS string literal — json.dumps gives us a properly quoted /
+    # escaped form. For our regex-safe scene_ids this is identical
+    # to a plain double-quoted string; the dependency keeps it safe
+    # if the scene-id rule ever loosens.
+    scene_id_js = json.dumps(scene_id)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Live AR — {safe_id}</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  html, body {{ margin: 0; height: 100%; overflow: hidden; background: #111;
+                color: #eee; font: 14px/1.4 -apple-system, BlinkMacSystemFont,
+                "Segoe UI", sans-serif; }}
+  canvas {{ display: block; }}
+  #info {{ position: fixed; top: 12px; left: 12px; right: 12px;
+           display: flex; justify-content: space-between; align-items: center;
+           pointer-events: none; z-index: 5; }}
+  #info .title {{ font-weight: 600; pointer-events: auto;
+                  background: rgba(0,0,0,0.45); padding: 6px 10px;
+                  border-radius: 16px; }}
+  #info .back {{ color: #eee; opacity: 0.85; text-decoration: none;
+                 pointer-events: auto; background: rgba(0,0,0,0.45);
+                 padding: 6px 10px; border-radius: 16px; }}
+  #info .back:hover {{ opacity: 1; }}
+  #overlay {{ position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%);
+              z-index: 4; pointer-events: none; }}
+  #status {{ background: rgba(0,0,0,0.55); padding: 8px 14px; border-radius: 12px;
+             font-size: 13px; max-width: 80vw; text-align: center; }}
+  /* ARButton injects an absolutely-positioned button — match the
+     model-viewer pill style so the two AR pages feel related. */
+  button.xr-button, .xr-button {{ position: fixed !important;
+    bottom: 24px !important; left: 50% !important;
+    transform: translateX(-50%) !important;
+    padding: 12px 24px !important; border: 0 !important;
+    border-radius: 24px !important; background: #fff !important;
+    color: #111 !important; font: 600 14px -apple-system, sans-serif !important;
+    z-index: 6 !important; cursor: pointer; }}
+</style>
+<script type="importmap">
+{{
+  "imports": {{
+    "three": "https://unpkg.com/three@{safe_three}/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@{safe_three}/examples/jsm/"
+  }}
+}}
+</script>
+</head>
+<body>
+<div id="info">
+  <div class="title">Live AR · {safe_id}</div>
+  <a class="back" href="/ar/{safe_id}">← viewer</a>
+</div>
+<div id="overlay">
+  <div id="status">Loading model…</div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import {{ ARButton }} from 'three/addons/webxr/ARButton.js';
+import {{ GLTFLoader }} from 'three/addons/loaders/GLTFLoader.js';
+import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
+
+const SCENE_ID = {scene_id_js};
+const MODEL_URL = `/ar/${{SCENE_ID}}/model.glb`;
+const statusEl = document.getElementById('status');
+const setStatus = (m) => {{ statusEl.textContent = m; }};
+
+const renderer = new THREE.WebGLRenderer({{ alpha: true, antialias: true }});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(
+  70, window.innerWidth / window.innerHeight, 0.01, 100);
+camera.position.set(0, 1.2, 2.5);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.0));
+const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+dir.position.set(5, 10, 7);
+scene.add(dir);
+
+// Non-AR preview: free-orbit camera so the page is useful even when
+// WebXR isn't available (desktops, iOS Safari today).
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.5, 0);
+controls.update();
+
+// Reticle indicating where a tap will place the model in AR.
+const reticle = new THREE.Mesh(
+  new THREE.RingGeometry(0.07, 0.10, 32).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({{ color: 0xffffff }})
+);
+reticle.matrixAutoUpdate = false;
+reticle.visible = false;
+scene.add(reticle);
+
+// Load the model. We keep a template and clone it on each placement
+// so that 6.C (multi-object composition) can reuse the same path.
+const loader = new GLTFLoader();
+let modelTemplate = null;
+let previewClone = null;
+let placedModel = null;
+loader.load(
+  MODEL_URL,
+  (gltf) => {{
+    modelTemplate = gltf.scene;
+    previewClone = modelTemplate.clone();
+    scene.add(previewClone);
+    setStatus('Tap "START AR" to place in your space.');
+  }},
+  undefined,
+  (err) => setStatus('Failed to load model: ' + (err.message || err))
+);
+
+// ARButton injects itself into the DOM and manages session start/end.
+const arButton = ARButton.createButton(renderer, {{
+  requiredFeatures: ['hit-test'],
+  optionalFeatures: ['dom-overlay'],
+  domOverlay: {{ root: document.getElementById('overlay') }}
+}});
+arButton.classList.add('xr-button');
+document.body.appendChild(arButton);
+
+let hitTestSource = null;
+let localSpace = null;
+
+renderer.xr.addEventListener('sessionstart', async () => {{
+  setStatus('Move the phone around to find a surface, then tap.');
+  if (previewClone) previewClone.visible = false;
+  const session = renderer.xr.getSession();
+  const viewerSpace = await session.requestReferenceSpace('viewer');
+  hitTestSource = await session.requestHitTestSource({{ space: viewerSpace }});
+  localSpace = await session.requestReferenceSpace('local');
+}});
+
+renderer.xr.addEventListener('sessionend', () => {{
+  hitTestSource = null;
+  localSpace = null;
+  if (placedModel) {{ scene.remove(placedModel); placedModel = null; }}
+  if (previewClone) previewClone.visible = true;
+  reticle.visible = false;
+  setStatus('Out of AR. Tap "START AR" again to retry.');
+}});
+
+// Controller exposes the "select" event for taps inside an AR session.
+const controller = renderer.xr.getController(0);
+controller.addEventListener('select', () => {{
+  if (!reticle.visible || !modelTemplate) return;
+  if (placedModel) scene.remove(placedModel);
+  placedModel = modelTemplate.clone();
+  placedModel.position.setFromMatrixPosition(reticle.matrix);
+  scene.add(placedModel);
+  setStatus('Placed. Tap again to move it.');
+}});
+scene.add(controller);
+
+renderer.setAnimationLoop((time, frame) => {{
+  if (frame && hitTestSource && localSpace) {{
+    const hits = frame.getHitTestResults(hitTestSource);
+    if (hits.length) {{
+      const pose = hits[0].getPose(localSpace);
+      reticle.visible = true;
+      reticle.matrix.fromArray(pose.transform.matrix);
+    }} else {{
+      reticle.visible = false;
+    }}
+  }} else {{
+    controls.update();
+  }}
+  renderer.render(scene, camera);
+}});
+
+window.addEventListener('resize', () => {{
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}});
+</script>
+</body>
+</html>
+"""
 
 
 def _render_viewer_html(scene_id: str) -> str:
@@ -90,7 +300,11 @@ def _render_viewer_html(scene_id: str) -> str:
     padding:12px 18px;border:0;border-radius:24px;background:#fff;color:#111;
     font-weight:600;">View in your space</button>
 </model-viewer>
-<div class="hint">scene: {safe_id}</div>
+<div class="hint">
+  scene: {safe_id} · <a href="/ar/{safe_id}/live"
+    style="color:#eee;text-decoration:underline;text-decoration-color:#444;
+    pointer-events:auto;">live AR (WebXR)</a>
+</div>
 </body>
 </html>
 """
@@ -118,6 +332,20 @@ def build_ar_router(store: ARStore) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"Unknown scene: {scene_id}")
         _log.info("ar.viewer status=200 scene=%s", scene_id)
         return HTMLResponse(_render_viewer_html(scene_id))
+
+    @router.get("/{scene_id}/live", response_class=HTMLResponse)
+    async def ar_live(scene_id: SceneId) -> HTMLResponse:
+        """Return the three.js + WebXR live placement page for ``scene_id``.
+
+        Same 404 semantics as the model-viewer route — the page would
+        load but the GLB fetch inside it would 404, so we'd rather
+        fail before serving HTML.
+        """
+        if not store.exists(scene_id):
+            _log.info("ar.live status=404 scene=%s", scene_id)
+            raise HTTPException(status_code=404, detail=f"Unknown scene: {scene_id}")
+        _log.info("ar.live status=200 scene=%s", scene_id)
+        return HTMLResponse(_render_live_html(scene_id))
 
     @router.get("/{scene_id}/model.glb")
     async def ar_glb(scene_id: SceneId) -> Response:

@@ -144,3 +144,56 @@ class TestEscaping:
         r = client.get("/ar/scene_42-A")
         assert r.status_code == 200
         assert "scene_42-A" in r.text
+
+
+class TestLivePage:
+    """Phase 6.A — three.js + WebXR live placement route."""
+
+    def test_returns_html_with_three_js(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        _seed_scene(store, "live1")
+        r = client.get("/ar/live1/live")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        body = r.text
+        # three.js import map + ARButton import = the load-bearing
+        # pieces of the WebXR scaffold.
+        assert "three.module.js" in body
+        assert "ARButton" in body
+        assert "hit-test" in body
+
+    def test_references_glb_url_for_scene(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        _seed_scene(store, "live2")
+        body = client.get("/ar/live2/live").text
+        # The page must load the scene's own GLB. JSON-encoded JS
+        # string literal so the regex-safe scene_id is delivered as
+        # `"live2"` in the JS source.
+        assert '"live2"' in body
+        assert "/${SCENE_ID}/model.glb" in body or "/live2/model.glb" in body
+
+    def test_returns_404_for_unknown_scene(self, client: TestClient) -> None:
+        r = client.get("/ar/nope/live")
+        assert r.status_code == 404
+
+    def test_invalid_scene_id_rejected(self, client: TestClient) -> None:
+        # Same path-param regex protections as the model-viewer route.
+        r = client.get("/ar/has%20space/live")
+        assert r.status_code in (404, 422)
+
+    def test_path_traversal_blocked(self, client: TestClient) -> None:
+        r = client.get("/ar/..%2Fetc/live")
+        assert r.status_code in (404, 422)
+
+
+class TestViewerLinksToLive:
+    """The classic viewer page must link out to the live WebXR variant."""
+
+    def test_viewer_includes_live_link(
+        self, store: FilesystemARStore, client: TestClient
+    ) -> None:
+        _seed_scene(store, "linked")
+        body = client.get("/ar/linked").text
+        assert 'href="/ar/linked/live"' in body

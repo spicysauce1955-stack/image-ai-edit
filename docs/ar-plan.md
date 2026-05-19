@@ -127,6 +127,62 @@ place as a future hook (Phase 5).
   longer-term roadmap (SAM + depth → mesh; Luma/Polycam input)
 - [ ] Migration note on the WebXR-SLAM / AR Foundation native track
 
+### Phase 6 — Realtime in-browser AR placement
+
+**2026-05-19 replan:** the original plan stopped at OS-delegated AR
+(Quick Look / Scene Viewer handoff). The user goal is realtime
+placement *inside the app context* — tap a surface, see a model
+anchored there, walk around it, compose multiple objects, eventually
+bridge back to the 2D pipeline. Path: WebXR-direct via three.js, on
+top of the existing catalog + AR routes. iOS Safari WebXR is still
+limited (research/ar-survey/01-web-ar/findings.md, "WebXR Device API
+support matrix"), so iOS users keep the existing Quick Look fallback
+— Phase 6 is additive, not replacement.
+
+Why WebXR over native: keeps the Python + web stack consistent with
+`docs/stack-decision.md`; the synthesis doc's "Web AR" path is the
+cheapest route to realtime hit-test placement and avoids forking
+into Unity / AR Foundation builds. See `research/ar-survey/06-synthesis/index.md`.
+
+- **6.A — three.js + WebXR scaffold** ✓ each phase: one PR, ends green
+  - [ ] `GET /ar/{scene_id}/live` returns a three.js page wired with
+    WebXR `immersive-ar` + `hit-test`. ARButton handles entry +
+    no-support fallback.
+  - [ ] Tap a detected surface → place the catalog entry's model. One
+    instance at a time (6.B adds manipulation).
+  - [ ] Link from `/ar/{scene_id}` viewer page (where WebXR is
+    likely) to the `/live` variant.
+  - [ ] Tests: route returns HTML, references three.js + the GLB
+    URL; 404 for unknown scenes; scene-id regex still blocks
+    traversal.
+
+- **6.B — Touch manipulation**
+  - [ ] Drag-on-plane to move, two-finger rotate, pinch to scale.
+  - [ ] "Lock" button to commit a placement; "Reset" to clear.
+  - [ ] DOM overlay for the manipulation HUD.
+
+- **6.C — Multi-object composition**
+  - [ ] In-AR catalog drawer (small list of thumbnails) opened from
+    a button on the HUD.
+  - [ ] Tap entry → place another instance.
+  - [ ] Per-instance selection + transform.
+  - [ ] "Snapshot" → captures camera + virtual overlay to a PNG and
+    POSTs it to a new server endpoint that returns a download URL.
+
+- **6.D — Bridge to the 2D pipeline**
+  - [ ] "Photoreal it" button on the snapshot panel: hand the AR
+    screenshot to the existing `pipeline/insert.py` with the placed
+    model as the reference, producing a photoreal 2D composite.
+  - [ ] Closes the AR-to-2D loop and lets the same catalog drive
+    both surfaces.
+
+- **6.E — Persistence (optional, can split off)**
+  - [ ] Local: localStorage-backed placement save / restore keyed by
+    `scene_id`.
+  - [ ] Cloud (much later): a stored anchor backend + a VPS provider
+    integration (Niantic Lightship / Immersal). Research synthesis
+    has the comparison.
+
 ## Repo layout (target after Phase 3)
 
 ```
