@@ -25,8 +25,17 @@ server = [
     "uvicorn[standard]>=0.32",
     "python-multipart>=0.0.20",
 ]
+# Optional — only needed when expanding the catalog with assets that
+# ship as .gltf + external textures (e.g. Poly Haven). See
+# pipeline/asset_bundle.py.
+bundle = [
+    "pygltflib>=1.16",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
 asyncio_mode = "auto"
+markers = [
+    "network: opts into the live-internet test gate (RUN_NETWORK_TESTS=1).",
+]
