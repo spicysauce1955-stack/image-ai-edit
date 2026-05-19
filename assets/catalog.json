@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "box",
+      "name": "Box",
+      "category": "sample",
+      "description": "Khronos's canonical 'hello world' — a unit cube with PBR texture. Used as the AR delivery sanity check.",
+      "glb_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Box/glTF-Binary/Box.glb",
+      "usdz_url": null,
+      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Box/screenshot/screenshot.png",
+      "license": "CC0-1.0",
+      "attribution": "",
+      "source_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Box",
+      "scale_hint": null
+    },
+    {
+      "id": "duck",
+      "name": "Duck",
+      "category": "sample",
+      "description": "The historical glTF mascot. Stress-tests skinned / textured rendering without being heavy.",
+      "glb_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Duck/glTF-Binary/Duck.glb",
+      "usdz_url": null,
+      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Duck/screenshot/screenshot.png",
+      "license": "SCEA-Shared-Source-1.0",
+      "attribution": "Sony Computer Entertainment America (SCEA)",
+      "source_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Duck",
+      "scale_hint": null
+    },
+    {
+      "id": "damaged_helmet",
+      "name": "Damaged Helmet",
+      "category": "sample",
+      "description": "High-end PBR showpiece — verifies that complex material maps render correctly in the chosen viewer.",
+      "glb_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb",
+      "usdz_url": null,
+      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/screenshot/screenshot.png",
+      "license": "CC-BY-4.0",
+      "attribution": "ctxwing / theblueturtle_ (Khronos Sample Assets)",
+      "source_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/DamagedHelmet",
+      "scale_hint": null
+    },
+    {
+      "id": "boombox",
+      "name": "BoomBox",
+      "category": "sample",
+      "description": "Compact PBR test model — smaller than DamagedHelmet, useful for low-end device smoke.",
+      "glb_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/glTF-Binary/BoomBox.glb",
+      "usdz_url": null,
+      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/screenshot/screenshot.png",
+      "license": "CC0-1.0",
+      "attribution": "Microsoft",
+      "source_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/BoomBox",
+      "scale_hint": null
+    }
+  ]
+}
