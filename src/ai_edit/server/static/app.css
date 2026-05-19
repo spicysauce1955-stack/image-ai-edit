@@ -43,6 +43,65 @@ header h1 { font-size: 1.4rem; margin: 0 0 0.25rem; font-weight: 600; }
 .muted { color: var(--muted); }
 .small { font-size: 0.85rem; }
 
+/* AR picker — appears after a composite renders. Horizontal scroll of
+   small tiles, each linking to /ar/<id> in a new tab. */
+.ar-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  overflow-x: auto;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+}
+.ar-row-label {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  padding-right: 8px;
+  flex-shrink: 0;
+}
+.ar-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 80px;
+  flex-shrink: 0;
+  padding: 6px;
+  border-radius: 8px;
+  text-decoration: none;
+  color: inherit;
+  font-size: 12px;
+  text-align: center;
+  transition: background 120ms ease;
+}
+.ar-tile:hover {
+  background: var(--border);
+}
+.ar-tile img,
+.ar-tile-placeholder {
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.ar-tile-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  color: var(--muted);
+}
+.ar-tile-name {
+  margin-top: 4px;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 main {
   max-width: 1280px;
   margin: 0 auto;

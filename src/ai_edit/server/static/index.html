@@ -140,6 +140,11 @@
         <img id="aux-preview" alt="auxiliary image sent to model" />
       </div>
 
+      <!-- AR picker — populated by app.js once the catalog loads and a
+           composite has been rendered. Links open /ar/<id> in a new
+           tab so the existing session stays intact. -->
+      <div id="ar-row" class="ar-row" hidden></div>
+
       <form id="refine" hidden>
         <input type="text" id="refine-input" placeholder="Refine: 'move it left', 'remove the umbrella', 'make it taller'…" />
         <button type="submit">Refine</button>

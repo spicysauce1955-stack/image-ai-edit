@@ -43,6 +43,7 @@ const canvasEl       = $('#canvas');
 const auxRow         = $('#aux-row');
 const auxLabel       = $('#aux-label');
 const auxImg         = $('#aux-preview');
+const arRow          = $('#ar-row');
 const refineForm     = $('#refine');
 const refineInput    = $('#refine-input');
 const historyList    = $('#history-list');
@@ -58,6 +59,11 @@ let poles = [];
 let sectionHeightPct = 18;     // section height as % of image height
 let lastComposite = null;
 const history = [];
+
+// AR catalog cache, populated from /api/catalog on page load. Empty
+// until the fetch resolves, in which case the AR picker stays hidden —
+// renderResult is robust to that.
+let arCatalog = [];
 
 let defaults = { free: '', mask: '', overlay: '', refine: '' };
 let currentMode = 'mask';
@@ -78,6 +84,13 @@ fetch('/api/defaults')
     syncSystemPrompt(); // fill the textarea now that defaults arrived
   })
   .catch(() => setStatus('Could not load default prompts.', true));
+
+// --- AR catalog bootstrap (fire-and-forget). Silently fail — the AR
+// picker is non-critical; the 2D pipeline still works without it.
+fetch('/api/catalog')
+  .then((r) => (r.ok ? r.json() : []))
+  .then((entries) => { arCatalog = Array.isArray(entries) ? entries : []; })
+  .catch(() => { arCatalog = []; });
 
 // --- File drops
 bindFileDrop(referenceDrop, referenceInput, (file) => {
@@ -266,9 +279,68 @@ function renderResult(blob, label, kind, auxUrl, auxKind) {
     auxRow.hidden = true;
     auxImg.removeAttribute('src');
   }
+  renderArRow(instructionEl.value);
   refineForm.hidden = false;
   refineInput.focus();
   pushHistory(blob, label, kind);
+}
+
+// Pick the most-likely category by scanning the instruction text for
+// any catalog category name. Returns null when nothing matches, in
+// which case the picker shows all entries.
+function pickArCategoryFromInstruction(text) {
+  if (!arCatalog.length) return null;
+  const t = (text || '').toLowerCase();
+  const categories = Array.from(new Set(arCatalog.map((e) => e.category)));
+  for (const cat of categories) {
+    if (t.includes(cat.toLowerCase())) return cat;
+  }
+  return null;
+}
+
+function renderArRow(instructionText) {
+  if (!arCatalog.length) { arRow.hidden = true; return; }
+  const picked = pickArCategoryFromInstruction(instructionText);
+  const entries = picked
+    ? arCatalog.filter((e) => e.category === picked)
+    : arCatalog;
+  if (!entries.length) { arRow.hidden = true; return; }
+
+  arRow.innerHTML = '';
+  const label = document.createElement('span');
+  label.className = 'ar-row-label';
+  label.textContent = picked ? `Try in AR (${picked}):` : 'Try in AR:';
+  arRow.appendChild(label);
+
+  for (const entry of entries) {
+    const tile = document.createElement('a');
+    tile.className = 'ar-tile';
+    tile.href = entry.ar_url || `/ar/${entry.id}`;
+    tile.target = '_blank';
+    tile.rel = 'noopener';
+    tile.title = `${entry.name} — open AR viewer in new tab`;
+
+    if (entry.thumbnail_url) {
+      const img = document.createElement('img');
+      img.src = entry.thumbnail_url;
+      img.alt = entry.name;
+      img.loading = 'lazy';
+      tile.appendChild(img);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'ar-tile-placeholder';
+      placeholder.textContent = '3D';
+      tile.appendChild(placeholder);
+    }
+
+    const name = document.createElement('span');
+    name.className = 'ar-tile-name';
+    name.textContent = entry.name;
+    tile.appendChild(name);
+
+    arRow.appendChild(tile);
+  }
+  arRow.hidden = false;
 }
 
 function pushHistory(blob, label, kind) {
