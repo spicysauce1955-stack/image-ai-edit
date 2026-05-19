@@ -15,6 +15,7 @@ Quick Look will refuse to render it.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -33,6 +34,20 @@ _MIME_TO_FILENAME: dict[str, str] = {
     MIME_USDZ: "model.usdz",
     MIME_GLTF_JSON: "model.gltf",
 }
+
+# Shared scene-id policy for route validation and direct store/script
+# callers. Sixty-four chars covers UUID hex and base64-url tokens with
+# room to spare.
+SCENE_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+_SCENE_ID_RE = re.compile(SCENE_ID_PATTERN)
+
+
+def validate_scene_id(scene_id: str) -> None:
+    """Raise ``ValueError`` if ``scene_id`` is unsafe for storage paths."""
+    if not _SCENE_ID_RE.fullmatch(scene_id):
+        raise ValueError(
+            "scene_id must be 1-64 chars of letters, digits, underscore, or hyphen"
+        )
 
 
 def filename_for_mime(mime_type: str) -> str | None:
@@ -91,16 +106,16 @@ class FilesystemARStore(ARStore):
                 model.usdz
                 model.gltf      # rare; only when a provider returns gltf+json
 
-    ``root`` is created lazily on first ``put``. The store does **not**
-    validate ``scene_id`` — that's the AR route's job (see the regex on
-    the route's path parameter) so the validation policy stays in one
-    place.
+    ``root`` is created lazily on first ``put``. ``scene_id`` is
+    validated here as well as at the HTTP route so direct callers
+    cannot accidentally write outside the configured root.
     """
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
 
     def _scene_dir(self, scene_id: str) -> Path:
+        validate_scene_id(scene_id)
         return self.root / scene_id
 
     def exists(self, scene_id: str) -> bool:

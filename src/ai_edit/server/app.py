@@ -33,12 +33,15 @@ from __future__ import annotations
 import json
 import secrets
 import tempfile
+from collections import OrderedDict
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, UnidentifiedImageError
 
 from ..config import load_env
 from ..pipeline import insert_object
@@ -61,19 +64,101 @@ class _CachedResult:
     composite_mime: str
     aux_bytes: bytes  # the binary mask; empty for free / refine
     aux_kind: str | None  # "mask" | None
+    composite_fetched: bool = False
+    aux_fetched: bool = False
 
 
-_RESULT_CACHE: dict[str, _CachedResult] = {}
+_RESULT_CACHE: OrderedDict[str, _CachedResult] = OrderedDict()
 _CACHE_CAP = 64
+_CACHE_MAX_BYTES = 256 * 1024 * 1024
+_MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+_MAX_IMAGE_PIXELS = 40_000_000
+_SAFE_IMAGE_SUFFIXES = {
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 
 
 def _cache_put(result: _CachedResult) -> str:
     """Stash a result and return an opaque token."""
-    if len(_RESULT_CACHE) >= _CACHE_CAP:
+    result_size = len(result.composite_bytes) + len(result.aux_bytes)
+    while _RESULT_CACHE and (
+        len(_RESULT_CACHE) >= _CACHE_CAP
+        or _cache_size_bytes() + result_size > _CACHE_MAX_BYTES
+    ):
         _RESULT_CACHE.pop(next(iter(_RESULT_CACHE)))
     token = secrets.token_urlsafe(16)
     _RESULT_CACHE[token] = result
     return token
+
+
+def _cache_size_bytes() -> int:
+    """Return total binary payload bytes retained by the in-memory cache."""
+    return sum(len(r.composite_bytes) + len(r.aux_bytes) for r in _RESULT_CACHE.values())
+
+
+def _maybe_evict_fetched(token: str, result: _CachedResult) -> None:
+    """Delete a token once all available one-shot resources were fetched."""
+    aux_done = not result.aux_bytes or result.aux_fetched
+    if result.composite_fetched and aux_done:
+        _RESULT_CACHE.pop(token, None)
+
+
+async def _read_upload_limited(
+    upload: UploadFile,
+    *,
+    label: str,
+    max_bytes: int = _MAX_UPLOAD_BYTES,
+) -> bytes:
+    """Read an upload in chunks and reject oversized bodies with 413."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{label} image is too large; limit is {max_bytes // (1024 * 1024)} MiB.",
+            )
+        chunks.append(chunk)
+    if not chunks:
+        raise HTTPException(status_code=400, detail=f"{label} image is empty.")
+    return b"".join(chunks)
+
+
+def _validate_image_bytes(data: bytes, *, label: str) -> None:
+    """Ensure uploaded bytes are an image and keep decompression bounded."""
+    try:
+        with Image.open(BytesIO(data)) as img:
+            width, height = img.size
+    except (UnidentifiedImageError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=f"{label} must be a valid image.") from exc
+    if width <= 0 or height <= 0 or width * height > _MAX_IMAGE_PIXELS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"{label} image dimensions are too large; "
+                f"limit is {_MAX_IMAGE_PIXELS:,} pixels."
+            ),
+        )
+
+
+def _upload_path(tmp_path: Path, upload: UploadFile, stem: str) -> Path:
+    """Build a server-controlled temp path while preserving a safe suffix."""
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix not in _SAFE_IMAGE_SUFFIXES:
+        suffix = ".bin"
+    return tmp_path / f"{stem}{suffix}"
 
 
 def _parse_uv_list(raw: str, *, min_count: int, label: str) -> list[tuple[float, float]] | None:
@@ -98,7 +183,10 @@ def _parse_uv_list(raw: str, *, min_count: int, label: str) -> list[tuple[float,
     for p in parsed:
         if not (isinstance(p, (list, tuple)) and len(p) == 2):
             raise HTTPException(status_code=400, detail=f"Bad {label} vertex: {p!r}")
-        u, v = float(p[0]), float(p[1])
+        try:
+            u, v = float(p[0]), float(p[1])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Bad {label} vertex: {p!r}") from exc
         if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
             raise HTTPException(
                 status_code=400,
@@ -212,10 +300,18 @@ def create_app(ar_store: ARStore | None = None) -> FastAPI:
                 detail=f"Unknown mask_engine: {mask_engine!r}. Try {sorted(VALID_MASK_ENGINES)}.",
             )
 
-        scene_bytes = await scene.read()
-        reference_bytes = await reference.read()
-        previous_bytes = await previous.read() if previous is not None else None
+        scene_bytes = await _read_upload_limited(scene, label="scene")
+        reference_bytes = await _read_upload_limited(reference, label="reference")
+        previous_bytes = (
+            await _read_upload_limited(previous, label="previous")
+            if previous is not None
+            else None
+        )
         previous_mime = (previous.content_type or "image/png") if previous else "image/png"
+        _validate_image_bytes(scene_bytes, label="scene")
+        _validate_image_bytes(reference_bytes, label="reference")
+        if previous_bytes is not None:
+            _validate_image_bytes(previous_bytes, label="previous")
 
         seg_prompts = [s.strip() for s in segment.split(",") if s.strip()]
         relight_prompt = relight.strip() or None
@@ -239,8 +335,8 @@ def create_app(ar_store: ARStore | None = None) -> FastAPI:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            scene_path = tmp_path / (scene.filename or "scene.bin")
-            reference_path = tmp_path / (reference.filename or "reference.bin")
+            scene_path = _upload_path(tmp_path, scene, "scene")
+            reference_path = _upload_path(tmp_path, reference, "reference")
             scene_path.write_bytes(scene_bytes)
             reference_path.write_bytes(reference_bytes)
 
@@ -290,7 +386,13 @@ def create_app(ar_store: ARStore | None = None) -> FastAPI:
         cached = _RESULT_CACHE.get(token)
         if not cached:
             raise HTTPException(status_code=404, detail="Result expired or not found.")
-        return Response(content=cached.composite_bytes, media_type=cached.composite_mime)
+        if cached.composite_fetched:
+            raise HTTPException(status_code=404, detail="Composite already fetched.")
+        cached.composite_fetched = True
+        content = cached.composite_bytes
+        media_type = cached.composite_mime
+        _maybe_evict_fetched(token, cached)
+        return Response(content=content, media_type=media_type)
 
     @app.get("/api/result/{token}/aux.png")
     async def fetch_aux(token: str) -> Response:
@@ -299,7 +401,12 @@ def create_app(ar_store: ARStore | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Result expired or not found.")
         if not cached.aux_bytes:
             raise HTTPException(status_code=404, detail="No aux image for this result.")
-        return Response(content=cached.aux_bytes, media_type="image/png")
+        if cached.aux_fetched:
+            raise HTTPException(status_code=404, detail="Aux image already fetched.")
+        cached.aux_fetched = True
+        content = cached.aux_bytes
+        _maybe_evict_fetched(token, cached)
+        return Response(content=content, media_type="image/png")
 
     return app
 

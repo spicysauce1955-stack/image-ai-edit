@@ -29,12 +29,7 @@ from fastapi import APIRouter, HTTPException, Path
 from fastapi.responses import HTMLResponse, Response
 
 from ..models.base import MIME_GLB, MIME_USDZ
-from ..pipeline.ar_store import ARStore
-
-# Regex used as both the FastAPI path-param validator and an explicit
-# defence against path traversal. Sixty-four chars covers a UUID hex
-# (32) or a 22-char base64-url token with room to spare.
-SCENE_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+from ..pipeline.ar_store import ARStore, SCENE_ID_PATTERN
 
 # A FastAPI Annotated alias so all three routes use the same validator
 # without repeating the regex.

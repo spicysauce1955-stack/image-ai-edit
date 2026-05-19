@@ -11,6 +11,7 @@ from ai_edit.pipeline.ar_store import (
     ARStore,
     FilesystemARStore,
     filename_for_mime,
+    validate_scene_id,
 )
 
 
@@ -23,6 +24,16 @@ class TestFilenameForMime:
     def test_unknown_mime_returns_none(self) -> None:
         assert filename_for_mime("application/json") is None
         assert filename_for_mime("") is None
+
+
+class TestValidateSceneId:
+    def test_allows_expected_url_safe_ids(self) -> None:
+        validate_scene_id("scene_42-A")
+
+    @pytest.mark.parametrize("scene_id", ["", "../escape", "has space", "a" * 65])
+    def test_rejects_unsafe_ids(self, scene_id: str) -> None:
+        with pytest.raises(ValueError, match="scene_id"):
+            validate_scene_id(scene_id)
 
 
 class TestARStoreABC:
@@ -113,3 +124,10 @@ class TestFilesystemARStore:
             Scene3DAsset(data=b"x", mime_type=MIME_GLB, extension=".glb"),
         )
         assert store.exists("scene_g") is True
+
+    def test_rejects_path_traversal_scene_id(self, tmp_path: Path) -> None:
+        store = FilesystemARStore(tmp_path)
+        asset = Scene3DAsset(data=b"x", mime_type=MIME_GLB, extension=".glb")
+        with pytest.raises(ValueError, match="scene_id"):
+            store.put("../escape", asset)
+        assert not (tmp_path.parent / "escape").exists()

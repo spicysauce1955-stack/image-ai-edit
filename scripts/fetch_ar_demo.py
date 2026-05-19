@@ -27,6 +27,8 @@ from pathlib import Path
 
 import httpx
 
+from ai_edit.pipeline.ar_store import validate_scene_id
+
 # Khronos glTF-Sample-Assets / Box / Binary — the smallest non-trivial
 # certified sample. Stable URL: this repo is the official Khronos
 # replacement for the older glTF-Sample-Models, and "Box" has been
@@ -44,6 +46,7 @@ def download_demo(root: Path, scene_id: str) -> Path:
     — callers should let the exception propagate so the CLI exits
     non-zero.
     """
+    validate_scene_id(scene_id)
     target_dir = root / scene_id
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "model.glb"
@@ -71,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         glb_path = download_demo(Path(args.root), args.scene_id)
+    except ValueError as exc:
+        print(f"error: invalid scene id: {exc}", file=sys.stderr)
+        return 2
     except httpx.HTTPError as exc:
         print(f"error: failed to download {BOX_GLB_URL}: {exc}", file=sys.stderr)
         return 1
