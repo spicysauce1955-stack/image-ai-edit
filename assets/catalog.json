@@ -47,10 +47,49 @@
       "description": "Compact PBR test model — smaller than DamagedHelmet, useful for low-end device smoke.",
       "glb_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/glTF-Binary/BoomBox.glb",
       "usdz_url": null,
-      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/screenshot/screenshot.png",
+      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/screenshot/screenshot.jpg",
       "license": "CC0-1.0",
       "attribution": "Microsoft",
       "source_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/BoomBox",
+      "scale_hint": null
+    },
+    {
+      "id": "lantern",
+      "name": "Street Lantern",
+      "category": "outdoor",
+      "description": "Old wooden street light — the closest yard-relevant entry until self-contained outdoor GLBs land. Try it on a porch or path.",
+      "glb_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Lantern/glTF-Binary/Lantern.glb",
+      "usdz_url": null,
+      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Lantern/screenshot/screenshot.jpg",
+      "license": "CC0-1.0",
+      "attribution": "Microsoft (sbtron) + Frank Galligan",
+      "source_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Lantern",
+      "scale_hint": null
+    },
+    {
+      "id": "antique_camera",
+      "name": "Antique Camera",
+      "category": "decor",
+      "description": "Vintage tripod camera. Adds non-spherical, non-test-shape variety to the catalog.",
+      "glb_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/AntiqueCamera/glTF-Binary/AntiqueCamera.glb",
+      "usdz_url": null,
+      "thumbnail_url": "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/AntiqueCamera/screenshot/screenshot.jpg",
+      "license": "CC0-1.0",
+      "attribution": "UX3D (Maximilian Kamps)",
+      "source_url": "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/AntiqueCamera",
+      "scale_hint": null
+    },
+    {
+      "id": "teapot",
+      "name": "Teapot",
+      "category": "decor",
+      "description": "Apple's AR Quick Look gallery teapot — USDZ-only. The dedicated entry for verifying the iOS Quick Look handoff path; GLB-fed devices show 'no preview'.",
+      "glb_url": null,
+      "usdz_url": "https://developer.apple.com/augmented-reality/quick-look/models/teapot/teapot.usdz",
+      "thumbnail_url": null,
+      "license": "Apple Quick Look gallery sample",
+      "attribution": "Apple",
+      "source_url": "https://developer.apple.com/augmented-reality/quick-look/",
       "scale_hint": null
     }
   ]
