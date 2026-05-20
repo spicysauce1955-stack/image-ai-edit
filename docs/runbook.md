@@ -136,6 +136,9 @@ Expected:
 
 ### HTTPS for phone testing (Cloudflare Tunnel)
 
+> **Full walkthrough**: [`https-tunnel-guide.md`](./https-tunnel-guide.md).
+> Section below is the quick reference.
+
 Phase 6.A's `/ar/<id>/live` page uses WebXR, which browsers gate
 behind a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts).
 `localhost` is exempt — your laptop's own browser is fine over plain
