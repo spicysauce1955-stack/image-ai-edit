@@ -134,6 +134,87 @@ Expected:
 - On iOS: Quick Look will say "AR not supported" until you drop a
   USDZ at `out/scenes/demo/model.usdz`. Phase 2 will automate this.
 
+### HTTPS for phone testing (Cloudflare Tunnel)
+
+Phase 6.A's `/ar/<id>/live` page uses WebXR, which browsers gate
+behind a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts).
+`localhost` is exempt — your laptop's own browser is fine over plain
+HTTP — but a phone hitting `http://<laptop-ip>:8000` is not, and
+`navigator.xr` is silently `undefined`.
+
+The fix is to expose the dev server over a real HTTPS URL.
+We use [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+in "Quick Tunnel" mode — no Cloudflare account, no local certs, no
+phone-side root-CA install. `cloudflared` opens a public
+`https://<words>.trycloudflare.com` URL that proxies to your
+`localhost:8000`. The URL rotates per session.
+
+#### One-time setup
+
+Install `cloudflared` (system binary, not a pip dep):
+
+- **macOS:** `brew install cloudflared`
+- **Linux (Debian/Ubuntu):**
+  ```bash
+  curl -L https://pkg.cloudflare.com/cloudflared-stable-linux-amd64.deb \
+    -o /tmp/cloudflared.deb && sudo dpkg -i /tmp/cloudflared.deb
+  ```
+- **Windows:** `winget install --id Cloudflare.cloudflared`
+
+#### Per-run (two terminals)
+
+Terminal 1 — the app server:
+
+```bash
+.venv/bin/python scripts/serve.py        # http://127.0.0.1:8000
+```
+
+Terminal 2 — the tunnel:
+
+```bash
+.venv/bin/python scripts/dev_tunnel.py   # prints public HTTPS URL
+```
+
+Watch terminal 2 for a banner like:
+
+```
+============================================================
+ PUBLIC URL:  https://swift-banana-grove-x42.trycloudflare.com
+
+ Phone test (Android Chrome — WebXR):
+   https://swift-banana-grove-x42.trycloudflare.com/ar/chainlink_fence/live
+ ...
+```
+
+Open one of the printed URLs on the phone. No browser warning, the
+lock icon is solid, `navigator.xr` is defined on WebXR-capable
+browsers (Android Chrome; iOS Safari WebXR is still unavailable
+upstream — iPhones fall back to Quick Look via `/ar/<id>`).
+
+#### Privacy note
+
+The Quick Tunnel URL is **publicly accessible** while the tunnel is
+up. Don't post screenshots of the URL if you want to keep dev
+session details private. Sessions are typically minutes-to-hours and
+each restart of `dev_tunnel.py` rotates the URL.
+
+#### Troubleshooting HTTPS
+
+- **`cloudflared: command not found`** — `dev_tunnel.py` exits 127
+  with a platform hint. Re-read the install step.
+- **Public URL stays at 502** — the app server didn't start. Check
+  terminal 1; the tunnel forwards blindly.
+- **URL rotated** — restart `dev_tunnel.py`; the old URL is dead.
+- **WebXR still "Not Supported" on the phone** — confirm you're on
+  Android Chrome (iOS Safari WebXR isn't shipped upstream). If on
+  Android: check Chrome → Settings → Site Settings → AR (most AR-
+  capable devices have this on by default).
+- **iOS Quick Look fails on a GLB-only entry** — that's expected;
+  the catalog entry needs a `usdz_url`. The `teapot` entry has one
+  for confirming the iOS path works.
+- **Need a stable URL** — upgrade to a Cloudflare Named Tunnel
+  (requires a Cloudflare account); out of scope here.
+
 ### Troubleshooting AR
 
 - **Page 404s** — no asset exists for that `scene-id`. The store only
