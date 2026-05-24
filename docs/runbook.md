@@ -22,6 +22,21 @@ cp .env.example .env
 #   fence.jpg     — the reference object to insert
 ```
 
+### Optional: AR / three.js agent skills
+
+If you're working on the AR live page (`/ar/<id>/live`), install the
+three.js Agent Skills subset so Claude Code has the relevant API
+knowledge on hand:
+
+```bash
+.venv/bin/python scripts/fetch_skills.py          # default subset
+.venv/bin/python scripts/fetch_skills.py --list   # see all upstream modules
+```
+
+These install into `.claude/skills/` (gitignored — instruction-only
+Markdown from CloudAI-X/threejs-skills, which ships no license, so we
+fetch rather than vendor). Restart Claude Code to pick them up.
+
 ## Running the POC
 
 ### Minimum (Gemini key only)
