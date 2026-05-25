@@ -55,6 +55,7 @@ from ..pipeline.insert import (
 )
 from .ar_routes import build_ar_router
 from .catalog_routes import build_catalog_api_router, build_catalog_browse_router
+from .fence_routes import build_fence_router
 from .logging_setup import setup_logging
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -246,6 +247,7 @@ def create_app(
     ar_store_instance = ar_store if ar_store is not None else FilesystemARStore(DEFAULT_AR_ROOT)
     catalog_instance = catalog if catalog is not None else AssetCatalog.load()
     app.include_router(build_ar_router(ar_store_instance))
+    app.include_router(build_fence_router(ar_store_instance))
     app.include_router(build_catalog_api_router(catalog_instance))
     app.include_router(build_catalog_browse_router(catalog_instance))
 
