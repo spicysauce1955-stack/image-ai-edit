@@ -76,9 +76,10 @@ class TestGenerate:
         assert asset is not None
         assert asset.data == b"GLB-BYTES"
         assert asset.extension == ".glb"
-        # Only the front slot is populated.
+        # Only the primary (front) slot is populated. The required
+        # field is input_image_url, NOT front_image_url.
         args = fake_fal["arguments"]
-        assert "front_image_url" in args
+        assert "input_image_url" in args
         assert "back_image_url" not in args
         assert fake_fal["model_id"] == "fal-ai/hunyuan-3d/v3.1/pro/image-to-3d"
 
@@ -96,7 +97,7 @@ class TestGenerate:
         def b64(tag: bytes) -> str:
             return base64.b64encode(tag).decode()
 
-        assert b64(b"F") in args["front_image_url"]
+        assert b64(b"F") in args["input_image_url"]   # front = input_image_url
         assert b64(b"B") in args["back_image_url"]
         assert b64(b"L") in args["left_image_url"]
         assert b64(b"R") in args["right_image_url"]

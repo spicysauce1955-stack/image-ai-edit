@@ -581,13 +581,15 @@ class FalAINanoBanana:
 
 
 # Hunyuan3D 3.1 takes multi-view input as NAMED SLOTS, not an array.
-# The ordered `references` list maps positionally onto the cardinal
-# views below. v3.1 also accepts top/bottom/diagonal slots (e.g.
-# ``right_front_image_url``); pass those by name via kwargs — their
-# exact param names aren't pinned here. See docs/stack-decision.md and
-# research/image-to-3d/synthesis.md.
+# The ordered `references` list maps positionally onto the slots below.
+# NOTE: the required primary (front) view is ``input_image_url`` — NOT
+# ``front_image_url`` (verified against the live 422 schema, 2026-05-25).
+# v3.1 also accepts top/bottom/diagonal slots
+# (``top_image_url``, ``bottom_image_url``, ``left_front_image_url``,
+# ``right_front_image_url``); pass those by name via kwargs. See
+# docs/stack-decision.md and research/image-to-3d/synthesis.md.
 _HUNYUAN_VIEW_SLOTS = (
-    "front_image_url",   # references[0] — required
+    "input_image_url",   # references[0] — required (front view)
     "back_image_url",    # references[1]
     "left_image_url",    # references[2]
     "right_image_url",   # references[3]
