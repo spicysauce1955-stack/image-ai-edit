@@ -17,6 +17,8 @@ Living design notes for `image-ai-edit`. Mirror of the project notes in the Obsi
 | [runbook.md](./runbook.md) | How to run the POC, troubleshoot it, read its output |
 | [server.md](./server.md) | FastAPI app: setup, endpoints, examples |
 | [https-tunnel-guide.md](./https-tunnel-guide.md) | Full walkthrough: phone-testing the AR pipeline over HTTPS |
+| [ar-plan.md](./ar-plan.md) | Phased AR roadmap (Phases 0–8) |
+| [multi-section-fence-design.md](./multi-section-fence-design.md) | Phase 8 solution design: kit-of-parts fence assembly |
 | [contributing.md](./contributing.md) | Recipes: add a provider, add a capability, style conventions |
 
 ## TL;DR

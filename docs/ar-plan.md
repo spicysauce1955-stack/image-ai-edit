@@ -319,9 +319,13 @@ provider class + thin wiring, not a redesign.
 constraint: sections share posts — N panels on a straight run need
 **N+1 posts**, not 2N (closed loop: N posts). So we assemble from
 reusable PANEL + POST components, not by repeating a whole "section".
-Research + sources: `research/multi-section-fence/findings.md`. This is
-the 3D analog of the repo's existing 2D pole-based builder (poles →
-sections between consecutive poles).
+The 3D analog of the repo's existing 2D pole-based builder.
+
+> **Full solution design: [`multi-section-fence-design.md`](./multi-section-fence-design.md)**
+> — data model, layout algorithm + transform math, component conventions,
+> runtime + bake assembly, API, UX, testing, and acceptance criteria.
+> Research + sources: `research/multi-section-fence/findings.md`.
+> The summary below is the at-a-glance; the design doc is authoritative.
 
 ### Hard constraint: keep existing features intact
 

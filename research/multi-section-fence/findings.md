@@ -128,7 +128,57 @@ Economics: 2 component generations → **any length assembles for free**
 
 ---
 
+## Addendum — real fencing standards + assembly mechanics (deeper pass)
+
+**Domain standards** (ground the data model):
+- Panel widths: commonly **6 ft / 8 ft**; post spacing "on-center" by
+  system (wood 6–8 ft, vinyl = panel width, chain-link 8–10 ft).
+- **Post types matter**: line (field), terminal/end, corner, gate,
+  brace — different geometry + footing. Model carries a `kind`.
+- Rails ≈ 1 per 24" height (6 ft privacy = 3 rails); pickets =
+  `ceil(width/(picket+gap))`.
+- **Slope**: *stepped* (panels stay rectangular, step down) vs *racked*
+  (parallelogram, pickets plumb + rails follow grade; vinyl racks ~10°).
+- **Units**: real fencing is imperial inches; glTF/WebXR is metres,
+  +Y up, +Z forward → store metres, treat imperial as display.
+
+**Assembly mechanics** (refines the naive "stretch" idea):
+- **Don't uniform-stretch the whole panel** — it distorts pickets + UVs.
+  Prefer tiling the infill or fixed-width + trimmed last bay; allow only
+  small uniform stretch (physical installs keep mismatch **< ~10%**).
+  Our `round()`-based bay count self-limits stretch to ~±10%, so the
+  v1 `stretch` fit is acceptable with a single baked panel GLB.
+- **Component anchors**: place the panel origin at a logical attach point
+  (base, mid-width), name anchor nodes + write `node.extras`
+  (`nominalWidth`, role) — exporters preserve `node.extras`. glTF is
+  +Y up / +Z forward / metres.
+- **Instancing** for rigid panels (cheap); spline-deform only when
+  bending (racked). Tile textures / repeat geometry rather than scaling
+  to preserve slat aspect.
+- **Corner / transform math was a research gap** → derived in
+  `docs/multi-section-fence-design.md` §6 (look-rotation between two
+  posts, corner-post bisector, miter `90°−θ/2`, racked shear).
+
+**The full solution design** built on all of this lives at
+`docs/multi-section-fence-design.md`.
+
 ## Sources
+
+Domain standards (deeper pass):
+- Fence post spacing — https://nmifence.com/blog/fence-post-spacing ; https://buyafence.com/fence-post-spacing-calculator-how-far-apart-should-fence-posts-be
+- Post types — https://starpickets.com/technology/different-types-of-fence-posts.html
+- Bufftech vinyl install (slope/step/rack) — https://bufftech.com/wp-content/uploads/sites/2/2023/10/bufftech-install-guide-e-2201cts.pdf
+- Slope (stepped vs racked) — https://avinylfence.com/vinyl-fence-installation-on-slope ; https://graberoutdoors.com/fencing-a-sloped-yard-what-you-need-to-know
+- ASTM F567 chain-link practice — https://spsfence.com/resources/ASTM/ASTM-F567.pdf
+- Ornamental steel catalog (tolerances, racking) — https://masterhalco.com/hubfs/MH%20PDF%20Files/Ornamental-Steel-Downloads/Montage-Ornamental-Steel/Catalog/Montage-Plus-Catalog.pdf
+
+Assembly mechanics (deeper pass):
+- Unreal SplineMesh vs ISM — https://dev.epicgames.com/documentation/unreal-engine/API/Runtime/Engine/USplineMeshComponent ; https://dev.epicgames.com/documentation/unreal-engine/instanced-static-mesh-component-in-unreal-engine
+- Blender resample curve — https://docs.blender.org/manual/en/latest/modeling/geometry_nodes/curve/operations/resample_curve.html
+- Blender glTF extras / anchors — https://docs.blender.org/manual/en/latest/addons/import_export/scene_gltf2.html
+- glTF 2.0 spec (axes/units/extras) — https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html
+- three.js scene optimization / instancing — https://tympanus.net/codrops/2025/02/11/building-efficient-three-js-scenes-optimize-performance-while-maintaining-quality
+- Panel module mismatch tolerance — https://recgroup.com/sites/default/files/documents/module_mismatch_en.pdf
 
 Kit-of-parts / procedural:
 - Unreal spline + meshes — https://dev.epicgames.com/community/learning/tutorials/39/unreal-engine-populating-meshes-along-a-spline-with-blueprints
