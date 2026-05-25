@@ -35,12 +35,21 @@ from typing import Any
 import httpx
 
 from ..config import get_env
-from ..models.base import BaseProvider, EditModel, EditResponse
+from ..models.base import (
+    MIME_GLB,
+    BaseProvider,
+    EditModel,
+    EditResponse,
+    Scene3DAsset,
+    Scene3DModel,
+    Scene3DResponse,
+)
 
 BASE_URL = "https://fal.run"
 QUEUE_URL = "https://queue.fal.run"
 DEFAULT_RELIGHT_MODEL = "fal-ai/iclight-v2"
 DEFAULT_INPAINT_MODEL = "fal-ai/flux-kontext-lora/inpaint"
+DEFAULT_HUNYUAN3D_MODEL = "fal-ai/hunyuan-3d/v3.1/pro/image-to-3d"
 # gpt-image-1.5/edit-image has a known fal-side queue-routing bug
 # ("Path /edit-image not found"); the gpt-image-1 (v1) edit-image
 # endpoint works through the same SDK path.
@@ -571,8 +580,110 @@ class FalAINanoBanana:
         )
 
 
+# Hunyuan3D 3.1 takes multi-view input as NAMED SLOTS, not an array.
+# The ordered `references` list maps positionally onto the cardinal
+# views below. v3.1 also accepts top/bottom/diagonal slots (e.g.
+# ``right_front_image_url``); pass those by name via kwargs — their
+# exact param names aren't pinned here. See docs/stack-decision.md and
+# research/image-to-3d/synthesis.md.
+_HUNYUAN_VIEW_SLOTS = (
+    "front_image_url",   # references[0] — required
+    "back_image_url",    # references[1]
+    "left_image_url",    # references[2]
+    "right_image_url",   # references[3]
+)
+
+
+def _first_model_url(data: dict[str, Any]) -> str:
+    """Return the GLB download URL from a Hunyuan3D result, or raise.
+
+    The result puts the mesh at ``model_glb.url`` and also mirrors it
+    under ``model_urls.glb.url``; we check both.
+    """
+    glb = data.get("model_glb")
+    if isinstance(glb, dict) and glb.get("url"):
+        return glb["url"]
+    glb2 = (data.get("model_urls") or {}).get("glb")
+    if isinstance(glb2, dict) and glb2.get("url"):
+        return glb2["url"]
+    raise RuntimeError(f"fal.ai returned no GLB model. Raw: {data}")
+
+
+class FalAIMultiImageTo3D(Scene3DModel):
+    """Hunyuan3D 3.1 Pro image-to-3D on fal.ai — multi-view → GLB.
+
+    Implements the :class:`Scene3DModel` capability. ``references`` is
+    an ordered list of ``(bytes, mime)`` photos of ONE object, mapped
+    positionally onto Hunyuan3D's named view slots (front, back, left,
+    right). The first (front) image is **required**. References beyond
+    the four cardinals are ignored unless their slot is passed
+    explicitly via ``kwargs`` (e.g. ``top_image_url=...``).
+
+    ``prompt`` is accepted for interface conformance but **not sent** —
+    the image-to-3d endpoint is image-driven and exposes no text
+    prompt (text conditioning lives on the separate text-to-3d
+    endpoint).
+
+    Cost (May 2026): ~$0.375 base; +$0.15 each for ``enable_pbr``,
+    multi-view (>1 image), and custom ``face_count``. Forward those via
+    kwargs. First cut returns GLB only (USDZ deferred to a
+    Format3DConverter pass).
+    """
+
+    def __init__(self, provider: FalAI) -> None:
+        self._provider = provider
+
+    async def generate(
+        self,
+        prompt: str,
+        references: list[tuple[bytes, str]] | None = None,
+        *,
+        model: str | None = None,
+        target_format: str = "glb",
+        **kwargs: Any,
+    ) -> Scene3DResponse:
+        """Generate a GLB from one or more angled photos of an object."""
+        import os
+
+        import fal_client
+
+        if not references:
+            raise ValueError(
+                "FalAIMultiImageTo3D.generate requires at least one reference "
+                "image (the front view)."
+            )
+
+        os.environ.setdefault("FAL_KEY", self._provider.api_key)
+
+        arguments: dict[str, Any] = {}
+        for (data, mime), slot in zip(references, _HUNYUAN_VIEW_SLOTS):
+            arguments[slot] = _data_uri(data, mime)
+        # generate_type / enable_pbr / face_count / extra named view
+        # slots pass straight through.
+        arguments.update(kwargs)
+
+        result = await asyncio.to_thread(
+            fal_client.subscribe,
+            model or DEFAULT_HUNYUAN3D_MODEL,
+            arguments=arguments,
+            with_logs=False,
+        )
+        glb_bytes = await _download(_first_model_url(result))
+        return Scene3DResponse(
+            assets=[
+                Scene3DAsset(
+                    data=glb_bytes,
+                    mime_type=MIME_GLB,
+                    extension=".glb",
+                    raw=result,
+                )
+            ],
+            raw=result,
+        )
+
+
 class FalAI(BaseProvider):
-    """fal.ai REST client. Exposes IC-Light, FLUX-Kontext-LoRA inpaint, gpt-image-1, and Nano Banana."""
+    """fal.ai REST client. Exposes IC-Light, FLUX-Kontext-LoRA inpaint, gpt-image-1, Nano Banana, and Hunyuan3D image-to-3D."""
 
     def __init__(
         self,
@@ -587,6 +698,7 @@ class FalAI(BaseProvider):
         self.gpt_image_2 = FalAIGPTImage2(self)
         self.nano_banana = FalAINanoBanana(self)
         self.flux_ref_inpaint = FalAIFluxRefInpaint(self)
+        self.multi_image_3d = FalAIMultiImageTo3D(self)
 
     @property
     def name(self) -> str:
