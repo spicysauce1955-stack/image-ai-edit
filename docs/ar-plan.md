@@ -313,6 +313,109 @@ provider class + thin wiring, not a redesign.
 3. **Cost guard:** cap generations / require explicit opt-in, since each
    call costs real money.
 
+## Phase 8 — Multi-section fences (kit-of-parts assembly)
+
+**2026-05-25.** Build a fence of *combined* sections in AR. The defining
+constraint: sections share posts — N panels on a straight run need
+**N+1 posts**, not 2N (closed loop: N posts). So we assemble from
+reusable PANEL + POST components, not by repeating a whole "section".
+Research + sources: `research/multi-section-fence/findings.md`. This is
+the 3D analog of the repo's existing 2D pole-based builder (poles →
+sections between consecutive poles).
+
+### Hard constraint: keep existing features intact
+
+Everything shipped works and must keep working. Phase 8 is **purely
+additive** — new modules, new routes, new scripts. Do NOT modify:
+- the 2D pipeline (`pipeline/insert.py`, the `/api/insert` route, the
+  pole/polygon/overlay handling),
+- the AR delivery routes (`/ar/{id}`, `/ar/{id}/live`, `/catalog`,
+  `/api/catalog`),
+- the image→3D provider (`FalAIMultiImageTo3D`), `ARStore`,
+  `asset_validate`, `optimize_glb`, the catalog.
+Reuse these; don't change them. The existing 189 tests must stay green;
+Phase 8 only adds tests.
+
+### Data model (new, additive)
+
+`pipeline/fence.py`:
+- `FenceSpec` (frozen dataclass): `panel_asset_id`, `post_asset_id`,
+  `panel_width`, `post_width`, `path` (list of points), `closed: bool`,
+  `slope_mode` ("stepped"|"racked", default "stepped"), rounding policy.
+- `compute_fence_layout(path, panel_width, *, closed, ...) -> FenceLayout`
+  — **pure function**, no rendering/network. Returns `posts: list[Transform]`
+  (deduped, shared at boundaries) and `panels: list[Transform]`
+  (position/rotation/scale-x). Encodes posts=panels+1 (open) / =panels
+  (closed), corner posts at polyline vertices, last-panel stretch.
+  This is the testable heart of the feature and the **first deliverable**.
+
+The `path` concept is intentionally the same as the 2D builder's poles.
+We will NOT touch the 2D code, but `FenceSpec` is designed so a future
+adapter can build it from those poles (one fence model, two surfaces) —
+deferred, noted only.
+
+### Component sourcing (decision: generate separately)
+
+Extend the image→3D prep (do NOT change the single-section path) to emit
+two components from a source image: a **panel-only** GLB (posts masked
+out) and a **post-only** GLB. Reuses `poc_fence_3d.py`'s isolate step +
+`FalAIMultiImageTo3D` + `optimize_glb`. Stored in `ARStore` under
+component ids (e.g. `<fence>__panel`, `<fence>__post`). Part-splitting
+and mesh-segmentation are documented alternatives, not the v1 path.
+
+### Assembly (decision: runtime three.js, plus optional bake)
+
+- **Primary — runtime in a new WebXR page** (`/ar/{id}/fence` or a flag
+  on the live page): load PANEL + POST component GLBs, define the ground
+  path via WebXR hit-test, run the layout, place `THREE.InstancedMesh`
+  batches (one for posts, one for panels), dedup shared posts. Stays
+  extension-free → compatible with the bare GLTFLoader. New page; the
+  existing `/live` is untouched.
+- **Secondary — bake to one GLB** (`scripts/bake_fence.py` / an API
+  route) for model-viewer / iOS Quick Look / sharing, since those can't
+  assemble at runtime. Merge via the existing `optimize_glb` /
+  gltf-transform tooling; keep extension-free.
+
+### Sub-phases (each a small, tested, committed PR)
+
+- **8.A — Layout engine.** `pipeline/fence.py`: `FenceSpec` +
+  `compute_fence_layout`. Pure Python, no deps beyond stdlib/numpy.
+  Heavy unit tests: post counts (open N+1, closed N), shared-post dedup,
+  last-panel stretch, corner posts at vertices, degenerate paths. No AR,
+  no network. **Start here.**
+- **8.B — Components.** A prep step/script that emits panel-only +
+  post-only GLBs from an image, stored as components. Reuses existing
+  isolate + provider + optimizer. Mocked tests; one gated live test.
+- **8.C — Straight-run AR assembly.** New WebXR page: tap start→end (or
+  drop 2 posts), auto-fill panels, shared posts, InstancedMesh. The
+  layout algorithm ported to JS (or fetched from a Python
+  `/api/fence/layout` endpoint that wraps the 8.A pure function — keeps
+  one source of truth). Static-wiring tests.
+- **8.D — Polyline + corners.** Multi-segment paths, corner posts,
+  closed loops (enclosures). Layout-engine + UI extensions.
+- **8.E — Bake-to-GLB + slope.** `bake_fence.py` (assemble → extension-
+  free GLB for model-viewer/Quick Look); stepped vs racked slope in the
+  layout engine.
+
+### Decisions taken (defaults — redirectable)
+
+1. Components: generate panel-only + post-only separately.
+2. v1 scope: straight runs first (8.A–8.C); corners/enclosures in 8.D.
+3. One fence data model (`FenceSpec`); 2D-pole convergence deferred,
+   existing 2D code untouched.
+4. Flat-yard assumption first; slope deferred to 8.E.
+
+### Risks
+
+- Panel/post component isolation quality (masking posts out of the panel
+  crop). Mitigation: the nano-banana isolate already does clean
+  extraction; verify per-component as in Phase 7.
+- Layout↔render drift if the algorithm is duplicated in Python and JS.
+  Mitigation: 8.C fetches layout from the Python `/api/fence/layout`
+  endpoint (single source of truth) rather than re-implementing in JS.
+- Mobile instancing perf for long runs. Mitigation: measure on device;
+  `mergeGeometries` fallback (research notes the trade-off).
+
 ## Linked notes
 
 - [POC plan (2D)](./poc-plan.md) — the prior phase this builds on
@@ -320,6 +423,7 @@ provider class + thin wiring, not a redesign.
 - [Stack decision](./stack-decision.md) — vendor rationale
 - `research/INDEX.md` — full AR research index
 - `research/image-to-3d/synthesis.md` — image→3D recommendation feeding Phase 7
+- `research/multi-section-fence/findings.md` — kit-of-parts + runtime-assembly research feeding Phase 8
 - `research/ar-survey/06-synthesis/index.md` — comparison matrix + per-use-case stack recs
 
 #task #project #ar

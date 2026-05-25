@@ -22,6 +22,15 @@ object) into a GLB for the AR pipeline. Feeds the deferred Phase 2 of
 
 ---
 
+## 0b. `multi-section-fence/` — kit-of-parts fence assembly (2026-05-25)
+
+**Use when:** building a fence of *combined* sections (shared posts:
+N panels → N+1 posts). Feeds Phase 8 in `docs/ar-plan.md`.
+
+- [`multi-section-fence/findings.md`](multi-section-fence/findings.md) — the fencepost rule, how game/CAD tools build modular fences (Unreal/Unity/Blender/Houdini), the layout algorithm, component decomposition (generate panel+post separately), and WebXR/three.js `InstancedMesh` runtime assembly. Sources included.
+
+---
+
 ## 1. `ar-survey/` — broad survey of Web + Mobile AR (2025–2026)
 
 **Use when:** picking a stack for a new AR project; comparing frameworks; needing a vocabulary of methodologies; understanding the 2025–2026 landscape shifts.
