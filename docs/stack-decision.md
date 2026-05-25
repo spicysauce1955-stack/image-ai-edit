@@ -92,4 +92,33 @@ final.png
 | **Total per image** | **~$0.05–0.07** |
 | Meshy image-to-3D (one-off per product) | ~$0.30–0.50 |
 
+## Image→3D provider (Phase 7 · revised 2026-05-25)
+
+**Supersedes the "Meshy" pick in the AR-pipeline table above** for the
+generation step. After the deeper multi-view survey
+(`research/image-to-3d/`) and the requirement to support multiple
+angled photos, the chosen provider is **fal.ai Hunyuan3D 3.1 Pro
+(image-to-3D)**.
+
+- **Endpoint:** `fal-ai/hunyuan-3d/v3.1/pro/image-to-3d` (via the
+  existing `fal_client.subscribe` path in `providers/falai.py`).
+- **Why over Meshy** (the 2026-05-03 pick): reuses `FAL_KEY` + the
+  queue/subscribe + download infra already in `falai.py` (no new
+  provider account/key); native multi-view; commercial use permitted
+  per fal ToS.
+- **Multi-view shape — NAMED SLOTS, not an array.** Inputs:
+  `front_image_url` (required) + optional `back_image_url`,
+  `left_image_url`, `right_image_url`, plus v3.1 diagonals/top/bottom
+  (up to 8 angles). Our `Scene3DModel.generate(references=[...])` list
+  maps **positionally**: `references[0]`→front, `[1]`→back, `[2]`→left,
+  `[3]`→right (then diagonals).
+- **Output:** `model_glb` (GLB, `model/gltf-binary`) + OBJ; optional
+  PBR maps. First cut serves **GLB only** (USDZ + color fidelity
+  deferred to `Format3DConverter` — see `research/image-to-3d/synthesis.md`).
+- **Params:** `generate_type` Normal($0.375)/Geometry($0.225);
+  `enable_pbr` (+$0.15); `face_count` 40K–1.5M (custom +$0.15);
+  multi-view (+$0.15). Fully-loaded multi-view + PBR ≈ **$0.68/gen**.
+- **Meshy** remains the documented A/B-quality alternative
+  (dedicated 1–4-image `image_urls` endpoint) if fal output disappoints.
+
 #decision #project
