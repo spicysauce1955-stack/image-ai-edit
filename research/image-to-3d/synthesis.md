@@ -92,6 +92,25 @@ redesign.
 6. **Quality bar** — run the same 3–4 photos through fal-Hunyuan3D vs
    Meshy vs Tripo and eyeball the GLB in `/ar/<id>/live` before committing.
 
+## Color / material fidelity — deferred, not a first-step blocker
+
+Decision (2026-05-25): **first steps target GLB only, textured PBR as
+the generator emits it.** That already renders in full color via
+`<model-viewer>` and Android Scene Viewer, which is enough to validate
+the generate→place loop.
+
+Deferred to when `Format3DConverter` (GLB→USDZ) is built:
+- USDZ color/material fidelity for iOS Quick Look.
+- The one known trap to test then: **Quick Look ignores per-vertex
+  colors** — models must carry *textured* baseColor, not raw vertex
+  colors. Our catalog and the recommended generators (Hunyuan3D /
+  TRELLIS / Meshy / Tripo / Rodin) all output textured PBR, so this is
+  expected to be a non-issue; confirm with a 2-material textured GLB
+  round-tripped through the converter.
+
+So: don't invest in USDZ/multi-material hardening in the first build —
+GLB textured output is sufficient. Revisit alongside the iOS path.
+
 ## Explicitly NOT recommended for the primary flow
 
 - Photogrammetry (COLMAP/RealityCapture) — needs dozens of photos +
