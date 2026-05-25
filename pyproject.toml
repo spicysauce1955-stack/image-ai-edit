@@ -31,6 +31,15 @@ server = [
 bundle = [
     "pygltflib>=1.16",
 ]
+# Optional — delivery-weight optimization of generated GLBs
+# (scripts/optimize_glb.py). Also needs the gltf-transform Node CLI on
+# PATH for the UV-preserving mesh decimation step (npx @gltf-transform/cli).
+optimize = [
+    "trimesh>=4.0",
+    "numpy>=1.24",
+    "pygltflib>=1.16",
+    "pillow>=10.4",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
