@@ -243,12 +243,83 @@ image-ai-edit/
   Mitigation: explicit MIME tests in Phase 1 (already done); manual
   phone smoke in runbook.
 
+## Phase 7 — Generative multi-image → 3D
+
+**2026-05-25:** realizes the `Scene3DModel` AI-gen hook reserved in
+Phase 5. Turns photos (ideally 3–4 angles of one object) into a GLB
+that lands in the `ARStore` and serves through the existing AR routes.
+Grounded in `research/image-to-3d/` (esp. `synthesis.md`).
+
+**Scope of the first cut (deliberately small):**
+- Generative *sparse multi-view* (not photogrammetry).
+- Output **GLB only**, textured PBR as the model emits it — renders in
+  color via `<model-viewer>` + Scene Viewer. USDZ + color-fidelity
+  hardening are deferred to `Format3DConverter` (not this phase; see
+  `research/image-to-3d/synthesis.md` → color/material note).
+- Provider: **fal.ai-hosted**, reusing `FAL_KEY` + the queue/subscribe
+  client already in `providers/falai.py`.
+
+The `Scene3DModel.generate(prompt, references=[...], ...)` ABC is
+already multi-image-ready (`references` is a list), so this is one
+provider class + thin wiring, not a redesign.
+
+### 7.0 — Spike: confirm the fal endpoint (no commit beyond a doc note)
+- [ ] Confirm exact model + params on the live fal page: Hunyuan3D 3.1
+  (up to 8 views, PBR) vs TRELLIS `/multi`. Capture field names (image
+  array vs named slots), max views, per-gen cost, commercial-license
+  text. Record the choice in `docs/stack-decision.md`.
+
+### 7.A — `FalAIMultiImageTo3D` provider
+- [ ] New handler class in `providers/falai.py` implementing
+  `Scene3DModel`: takes `prompt` + `references: list[(bytes, mime)]`,
+  data-URI-uploads them, `fal_client.subscribe`, downloads the GLB,
+  returns a `Scene3DResponse` (GLB asset).
+- [ ] Re-use existing `_data_uri` / `_download` helpers.
+- [ ] Tests: mocked `fal_client.subscribe` for unit; one
+  `@pytest.mark.network` integration test gated by `RUN_NETWORK_TESTS=1`
+  asserting a valid GLB comes back (reuse `validate_glb`).
+
+### 7.B — CLI: `scripts/poc_3d.py`
+- [ ] `poc_3d.py --prompt "a wooden planter" img1.jpg img2.jpg img3.jpg`
+  → calls the provider, runs `validate_glb`, writes
+  `out/scenes/<id>/model.glb` (mirrors `catalog_fetch` store usage).
+- [ ] Prints the `/ar/<id>` and `/ar/<id>/live` URLs to view it.
+- [ ] Manual quality pass: same 3–4 photos through the chosen model;
+  eyeball in the live viewer. (Optionally A/B vs Meshy later.)
+
+### 7.C — Server endpoint
+- [ ] `POST /api/generate3d` — multipart (N images + prompt). Runs the
+  provider, validates, stores under a fresh `scene_id`, returns
+  `{scene_id, ar_url, live_url}`.
+- [ ] Latency is ~20–40 s+, so model it as a background job: return a
+  job id immediately, poll `GET /api/generate3d/{job}` for status →
+  scene URLs. (Reuse the in-memory job pattern from the existing
+  result cache in `server/app.py`.)
+- [ ] Upload limits + image validation reuse the Phase-hardening helpers
+  already in `server/app.py`.
+- [ ] Tests: route with an injected fake `Scene3DModel` (no network).
+
+### 7.D — UI: "Generate 3D from photos"
+- [ ] Minimal multi-image dropzone (1–4 photos) + prompt field that
+  POSTs to `/api/generate3d`, polls, then surfaces "View in AR" /
+  "Live AR" links. Reuses the catalog/AR-picker styling.
+- [ ] Static-wiring test like `test_index_ui_wiring.py`.
+
+**Open decisions to confirm before 7.A:**
+1. **Model:** Hunyuan3D 3.1 (more views, PBR, ~$0.375+/gen) vs TRELLIS
+   `/multi` (simpler/cheaper). Default: Hunyuan3D 3.1.
+2. **Endpoint UX:** background job (recommended, given latency) vs
+   sync-wait. Default: background job.
+3. **Cost guard:** cap generations / require explicit opt-in, since each
+   call costs real money.
+
 ## Linked notes
 
 - [POC plan (2D)](./poc-plan.md) — the prior phase this builds on
 - [Architecture](./architecture.md) — the adapter pattern this AR work plugs into
 - [Stack decision](./stack-decision.md) — vendor rationale
 - `research/INDEX.md` — full AR research index
+- `research/image-to-3d/synthesis.md` — image→3D recommendation feeding Phase 7
 - `research/ar-survey/06-synthesis/index.md` — comparison matrix + per-use-case stack recs
 
 #task #project #ar
