@@ -1,8 +1,24 @@
 # Research Index
 
-Last updated: 2026-05-18
+Last updated: 2026-05-25
 
-This directory holds three pieces of AR research, each with a distinct angle. Start with whichever matches your current question.
+This directory holds AR + image-to-3D research, each piece with a distinct angle. Start with whichever matches your current question.
+
+---
+
+## 0. `image-to-3d/` — automating image → 3D, multi-view focus (2026-05-25)
+
+**Use when:** choosing how to turn photos (ideally several angles of one
+object) into a GLB for the AR pipeline. Feeds the deferred Phase 2 of
+`docs/ar-plan.md` and the existing `Scene3DModel` capability ABC.
+
+- [`image-to-3d/README.md`](image-to-3d/README.md) — scope + the three regimes (single-image / sparse multi-view / metric photogrammetry)
+- [`image-to-3d/01-hosted-apis.md`](image-to-3d/01-hosted-apis.md) — **decision doc**: hosted APIs with multi-image input (Meshy, Tripo, Rodin, fal.ai Hunyuan3D/TRELLIS), formats, pricing, licensing
+- [`image-to-3d/02-model-landscape.md`](image-to-3d/02-model-landscape.md) — underlying models + the science of when multiple real photos help (1→4 big gains, ~8 diminishing)
+- [`image-to-3d/03-photogrammetry-and-neural.md`](image-to-3d/03-photogrammetry-and-neural.md) — metric path: COLMAP/RealityCapture/Metashape, NeRF, 3DGS→mesh, scan-app APIs (KIRI, Polycam)
+- [`image-to-3d/synthesis.md`](image-to-3d/synthesis.md) — **recommendation**: fal.ai-hosted multi-image (Hunyuan3D/TRELLIS) into the existing `Scene3DModel` ABC; Meshy as A/B alternative
+
+**Headline:** the `Scene3DModel.generate(references=[...])` ABC is already multi-image-ready; the build is one `FalAIMultiImageTo3D` provider class + a thin pipeline entrypoint, no redesign.
 
 ---
 
