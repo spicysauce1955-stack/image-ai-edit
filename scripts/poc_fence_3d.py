@@ -48,12 +48,20 @@ def angle_prompt(view: str) -> str:
     )
 
 
-# view label → output filename stem
-ANGLES = {
-    "the back (rear face)": "back",
-    "its left side edge (a thin side-on profile)": "left",
-    "its right side edge (a thin side-on profile)": "right",
-}
+BACK_PROMPT = angle_prompt("the back (rear face)")
+
+# Single side view. We generate ONE side then mirror it for the other —
+# a fence panel is left/right symmetric, so generating both independently
+# just produces mismatched geometry (e.g. a stray mid-panel slat on one
+# side only). Mirroring guarantees identical sides AND saves a paid call.
+SIDE_PROMPT = (
+    "The image is a single grey vinyl fence panel section isolated on white. "
+    "Render the SAME panel viewed exactly edge-on from one side: a thin, "
+    "uniform vertical profile showing the slim thickness of the panel and a "
+    "single square end post with its flat cap. Straight clean edge — NO "
+    "mid-panel protrusions, rails, or extra features. Plain pure-white "
+    "seamless background, soft even lighting, centered, no cast shadows."
+)
 
 
 async def isolate(fal: FalAI) -> None:
@@ -66,12 +74,27 @@ async def isolate(fal: FalAI) -> None:
 
 
 async def angles(fal: FalAI) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
     front = (VIEWS / "front.png").read_bytes()
-    for view, stem in ANGLES.items():
-        resp = await fal.nano_banana.edit((front, "image/png"), [], angle_prompt(view))
-        out = VIEWS / f"{stem}.png"
-        out.write_bytes(resp.image_bytes)
-        print(f"wrote {out} ({len(resp.image_bytes)} bytes)")
+
+    # Back face (real generation).
+    resp = await fal.nano_banana.edit((front, "image/png"), [], BACK_PROMPT)
+    (VIEWS / "back.png").write_bytes(resp.image_bytes)
+    print(f"wrote {VIEWS / 'back.png'} ({len(resp.image_bytes)} bytes)")
+
+    # One side (real generation).
+    resp = await fal.nano_banana.edit((front, "image/png"), [], SIDE_PROMPT)
+    (VIEWS / "left.png").write_bytes(resp.image_bytes)
+    print(f"wrote {VIEWS / 'left.png'} ({len(resp.image_bytes)} bytes)")
+
+    # Other side = horizontal mirror of the first — assume symmetry so
+    # the two sides are identical (avoids the asymmetric-slat artifact).
+    mirrored = Image.open(BytesIO(resp.image_bytes)).transpose(Image.FLIP_LEFT_RIGHT)
+    mirrored.save(VIEWS / "right.png")
+    print(f"wrote {VIEWS / 'right.png'} (mirror of left — symmetry assumed)")
 
 
 async def model(fal: FalAI, *, only: list[str] | None = None) -> None:
