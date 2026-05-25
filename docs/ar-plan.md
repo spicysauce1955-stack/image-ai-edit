@@ -397,9 +397,8 @@ and mesh-segmentation are documented alternatives, not the v1 path.
   one source of truth). Static-wiring tests.
 - **8.D — Polyline + corners.** Multi-segment paths, corner posts,
   closed loops (enclosures). Layout-engine + UI extensions.
-- **8.E — Bake-to-GLB + slope.** `bake_fence.py` (assemble → extension-
-  free GLB for model-viewer/Quick Look); stepped vs racked slope in the
-  layout engine.
+- **8.E — Bake-to-GLB.** `bake_fence.py` (assemble → extension-free GLB
+  for model-viewer/Quick Look). (Stepping is already in 8.A; no racking.)
 
 ### Decisions taken (defaults — redirectable)
 
@@ -407,7 +406,10 @@ and mesh-segmentation are documented alternatives, not the v1 path.
 2. v1 scope: straight runs first (8.A–8.C); corners/enclosures in 8.D.
 3. One fence data model (`FenceSpec`); 2D-pole convergence deferred,
    existing 2D code untouched.
-4. Flat-yard assumption first; slope deferred to 8.E.
+4. **Slope = stepped only** (settled): posts always plumb, panels always
+   level rectangles; on a slope the fence steps. **No racking/tilt** —
+   built into the 8.A layout engine via per-post ground heights, not a
+   later add-on.
 
 ### Risks
 

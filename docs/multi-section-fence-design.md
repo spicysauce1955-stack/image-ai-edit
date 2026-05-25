@@ -53,9 +53,12 @@ From the construction-standards research:
   pickets per panel = `ceil(panelWidth / (picketWidth + gap))`. Relevant
   only if we ever generate parametric panels; with a baked panel GLB this
   is descriptive metadata.
-- **Slope**: *stepped* (panels stay rectangular, step down the grade) vs
-  *racked* (panels shear into parallelograms following grade; pickets stay
-  plumb, rails follow the slope). Vinyl racks ~10° naturally.
+- **Slope — STEPPED ONLY (design decision).** Posts are **always
+  vertical/plumb** and panels are **always level rectangles** — neither
+  is ever inclined. On sloped ground the fence **steps down**: each bay
+  is offset vertically from its neighbour, like stairs. *Racked/raked*
+  fences (tilted panels following the grade) are explicitly **out of
+  scope** — there is no panel pitch/roll and no post tilt, ever.
 - **Gates** are special sections with terminal posts.
 - **Units**: physical fencing is imperial inches; glTF/WebXR is **meters,
   +Y up, +Z forward**. We store the spec in **meters** and treat imperial
@@ -69,8 +72,9 @@ All frozen dataclasses; pure data, no rendering.
 
 ```python
 PostKind = Literal["line", "terminal", "corner", "gate"]
-SlopeMode = Literal["stepped", "racked"]   # v1 implements "stepped"
-FitMode   = Literal["stretch", "tile", "fixed_partial"]  # v1: "stretch"
+FitMode  = Literal["stretch", "tile", "fixed_partial"]  # v1: "stretch"
+# No SlopeMode: posts are always plumb and panels always level. Sloped
+# ground is handled by stepping (per-post ground height), never tilting.
 
 @dataclass(frozen=True)
 class ComponentRef:
@@ -83,11 +87,11 @@ class ComponentRef:
 class FenceSpec:
     panel: ComponentRef
     post: ComponentRef
-    path: tuple[Vec3, ...]      # ordered points (metres), the fence line
+    path: tuple[Vec3, ...]      # ordered points (metres); y = ground height
     closed: bool = False        # True → enclosure (posts = panels)
     fit: FitMode = "stretch"
-    slope_mode: SlopeMode = "stepped"
     max_stretch: float = 0.12   # |bay/nominal − 1| tolerance before re-count
+    # Slope is always handled by stepping; no slope mode / no tilt.
 
 @dataclass(frozen=True)
 class Transform:
@@ -102,9 +106,10 @@ class PostPlacement:
 
 @dataclass(frozen=True)
 class PanelPlacement:
-    transform: Transform
-    bay_length: float           # metres
+    transform: Transform        # always level (yaw only; no pitch/roll)
+    bay_length: float           # metres (horizontal span)
     stretch: float              # scale applied on width axis (1.0 = nominal)
+    step_height: float          # bay's level mount height (metres) — stair step
 
 @dataclass(frozen=True)
 class FenceLayout:
@@ -200,16 +205,28 @@ For path points `p0..pk`:
 - **Closed loop** (`closed=True`): treat `p0` and `pk` as the same vertex →
   posts = panels.
 
-### 5.4 Slope
+### 5.4 Slope — stepped only
 
-- **`stepped`** (v1): compute layout on the horizontal projection; set
-  each post's y to the sampled ground height; panels stay rectangular and
-  level, sitting at the lower post's height (or spanning with a small
-  step). Panels never distort.
-- **`racked`** (8.E): panel becomes a parallelogram — pickets stay plumb,
-  rails follow grade. This is a **shear**, not a rotation (a rotation
-  would tilt the pickets). Either bake a racked panel variant or apply a
-  shear matrix. Deferred.
+Posts are always vertical and panels always level — the fence never
+tilts; it **steps**. Algorithm:
+
+- All horizontal layout (bay count, post X/Z, panel rotation) is computed
+  on the **horizontal projection** of the path (ignore y). So bays and
+  panel widths are unaffected by grade.
+- Each **post** is planted **plumb** at its boundary, base y = the
+  sampled ground height at that point. (Downhill posts simply stand
+  taller above grade.)
+- Each **panel** is a **level rectangle** mounted at a single
+  `step_height` for that bay — the bay's mount height (e.g. the higher of
+  its two posts' ground heights, so the panel is flush on the uphill side
+  and steps over the gap on the downhill side; the exact rule is a
+  parameter). Adjacent bays differ in `step_height` by the grade drop →
+  the stair-step look.
+- **No pitch, no roll, no shear, ever.** A panel's only rotation is yaw
+  to follow the horizontal segment direction (§6.1).
+
+On flat ground every `step_height` is equal and it reduces to a straight
+level run.
 
 ---
 
@@ -232,7 +249,11 @@ scale = (stretch, 1, 1)
 ```
 
 In three.js this is `instanceMatrix.compose(pos, q, scale)` written via
-`InstancedMesh.setMatrixAt(i, m)`.
+`InstancedMesh.setMatrixAt(i, m)`. Note `d` is the **horizontal**
+direction and `up` is world +Y, so the panel is **level by construction**
+— yaw only, never pitched or rolled. `pos.y = step_height` (§5.4) for the
+bay; on a slope the y differs between bays (the step), but each panel
+stays level.
 
 ### 6.2 Post placement
 
@@ -252,12 +273,12 @@ unit dir `v` (vertex→b):
   simply meet at the corner post.
 - if we ever miter rails: miter angle `= 90° − θ/2` from each side.
 
-### 6.4 Racked shear (Phase 8.E)
+### 6.4 (removed) — no racking
 
-For grade angle `φ` along the segment, shear the panel so rails rotate by
-`φ` while the local +Y (pickets) stays world-up: a shear in the X–Y plane,
-`y' = y, x' = x + y·tan(φ_local)` in panel-local space (or use a
-purpose-baked racked mesh). Deferred.
+Racked/raked panels are out of scope (see §2, §5.4). There is no shear
+and no panel/post tilt anywhere in the system. Sloped ground is handled
+entirely by `step_height` per bay (§5.4) with level panels and plumb
+posts.
 
 ---
 
@@ -342,7 +363,8 @@ No edits to `insert.py`, the `/api/insert` route, the pole/overlay code,
 ## 11. Phasing (each a small, tested, committed PR)
 
 - **8.A — Layout engine.** `pipeline/fence.py`: dataclasses +
-  `compute_fence_layout` (straight run, stretch fit, stepped). Pure;
+  `compute_fence_layout` (straight run, stretch fit, **stepping built in**
+  — level panels + plumb posts from per-post ground heights). Pure;
   heavy unit tests (§12). **No AR, no network. Start here.**
 - **8.B — Components.** `build_fence_components.py`: image → panel-only +
   post-only crops → image→3D → `optimize_glb` → store + `node.extras`
@@ -352,15 +374,18 @@ No edits to `insert.py`, the `/api/insert` route, the pole/overlay code,
   route tests.
 - **8.D — Polyline + corners + enclosures.** Layout-engine corner posts &
   closed loops; UI multi-tap path.
-- **8.E — Bake-to-GLB + racked slope.** `bake_fence.py`, `/api/fence/bake`;
-  racked shear in the layout engine.
+- **8.E — Bake-to-GLB.** `bake_fence.py`, `/api/fence/bake` — assemble a
+  FenceSpec into one extension-free GLB for model-viewer / Quick Look /
+  sharing. (No racking work — stepping is already in 8.A.)
 
 ### Acceptance criteria (per phase)
 - 8.A: `posts == panels + 1` (open) / `== panels` (closed); stretch ≤
-  `max_stretch` for n ≥ 2; deterministic transforms; degenerate paths
-  rejected.
+  `max_stretch` for n ≥ 2; **every panel transform is level (yaw-only,
+  zero pitch/roll) and every post is plumb**; stepping offsets bays by
+  the grade drop; deterministic transforms; degenerate paths rejected.
 - 8.C: a real 2-post tap produces a visually continuous run with N+1
-  posts on a phone; no duplicated shared posts.
+  posts on a phone; no duplicated shared posts; on a sloped tap the run
+  steps (panels level, posts plumb).
 - 8.E: baked GLB opens in model-viewer + Quick Look, extension-free.
 
 ---
@@ -393,3 +418,12 @@ No edits to `insert.py`, the `/api/insert` route, the pole/overlay code,
 4. **Path entry** — start→end (auto-divide) first; freehand multi-tap
    polyline in 8.D.
 5. **Units** — store metres; imperial display later.
+
+**Settled (not open):** slope is **stepped only** — posts always plumb,
+panels always level; no racking/tilt/shear anywhere.
+
+### Step mount-height rule (the one stepping detail to pin in 8.A)
+For a bay between posts at ground heights `h_a`, `h_b`, the panel's level
+`step_height` defaults to `max(h_a, h_b)` (flush on the uphill side,
+steps over the downhill gap). Exposed as a parameter so a "centre" or
+"min" rule can be chosen later; doesn't affect the level/plumb invariant.
