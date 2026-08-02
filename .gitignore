@@ -11,3 +11,6 @@ out/
 .claude/
 .superset/
 opencode.json
+
+# PDFs live in the encrypted archive, not loose in the repo
+*.pdf
